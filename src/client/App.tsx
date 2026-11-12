@@ -57,38 +57,53 @@ export const App: React.FC = () => {
       const decoder = new TextDecoder();
       let buffer = '';
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      const processLine = (line: string) => {
+        if (!line.startsWith('data: ')) return;
+        const payload = line.slice(6).trim();
+        if (payload === '[DONE]') return;
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+        try {
+          const event: AgentTraceEvent = JSON.parse(payload);
 
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const payload = line.slice(6).trim();
-          if (payload === '[DONE]') continue;
-
-          try {
-            const event: AgentTraceEvent = JSON.parse(payload);
-
-            if (event.type === 'status') {
-              currentTrace.push(event);
-              setStatusText(event.message || 'Processing memory...');
-            } else if (event.type === 'tool_start') {
-              currentTrace.push(event);
-              const count = event.queries?.length || 0;
-              setStatusText(`Dispatching ${count} batched web searches...`);
-            } else if (event.type === 'tool_end') {
-              currentTrace.push(event);
-              setStatusText(`Synthesizing ${event.resultCount} search results...`);
-            } else if (event.type === 'token') {
-              assistantText += event.content || '';
-              setStatusText('');
+          if (event.type === 'status') {
+            currentTrace.push(event);
+            setStatusText(event.message || 'Processing memory...');
+          } else if (event.type === 'tool_start') {
+            currentTrace.push(event);
+            const count = event.queries?.length || 0;
+            setStatusText(`Dispatching ${count} batched web searches...`);
+          } else if (event.type === 'tool_end') {
+            currentTrace.push(event);
+            setStatusText(`Synthesizing ${event.resultCount} search results...`);
+          } else if (event.type === 'token') {
+            assistantText += event.content || '';
+            setStatusText('');
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last && last.role === 'assistant' && last._streaming) {
+                return [
+                  ...prev.slice(0, -1),
+                  { ...last, content: assistantText, trace: [...currentTrace] }
+                ];
+              }
+              return [
+                ...prev,
+                {
+                  role: 'assistant',
+                  content: assistantText,
+                  trace: [...currentTrace],
+                  _streaming: true
+                }
+              ];
+            });
+          } else if (event.type === 'error') {
+            currentTrace.push(event);
+            setStatusText('');
+            if (event.error) {
+              assistantText += `\n\n**Error:** ${event.error}`;
               setMessages((prev) => {
                 const last = prev[prev.length - 1];
-                if (last && last.role === 'assistant' && last._streaming) {
+                if (last && last.role === 'assistant') {
                   return [
                     ...prev.slice(0, -1),
                     { ...last, content: assistantText, trace: [...currentTrace] }
@@ -100,25 +115,42 @@ export const App: React.FC = () => {
                     role: 'assistant',
                     content: assistantText,
                     trace: [...currentTrace],
-                    _streaming: true
+                    _streaming: false
                   }
                 ];
               });
-            } else if (event.type === 'error') {
-              currentTrace.push(event);
-            } else if (event.type === 'done') {
-              setMessages((prev) => {
-                const last = prev[prev.length - 1];
-                if (last && last.role === 'assistant') {
-                  const { _streaming, ...clean } = last;
-                  return [...prev.slice(0, -1), { ...clean, trace: [...currentTrace] }];
-                }
-                return prev;
-              });
             }
-          } catch {
-            // Non-JSON SSE line ignored
+          } else if (event.type === 'done') {
+            setStatusText('');
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last && last.role === 'assistant') {
+                const { _streaming, ...clean } = last;
+                return [...prev.slice(0, -1), { ...clean, trace: [...currentTrace] }];
+              }
+              return prev;
+            });
           }
+        } catch {
+          // Non-JSON SSE line ignored
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          if (buffer.trim()) {
+            processLine(buffer.trim());
+          }
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          processLine(line);
         }
       }
     } catch (err: any) {

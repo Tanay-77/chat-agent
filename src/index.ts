@@ -54,7 +54,7 @@ app.get('/health', (_req: Request, res: Response) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
     uptimeSeconds: process.uptime(),
-    model: process.env.MODEL_NAME || 'gemini-2.5-flash',
+    model: process.env.MODEL_NAME || 'gemini-3.5-flash-lite',
     configuredKeys: {
       gemini: Boolean(process.env.GEMINI_API_KEY),
       tavily: Boolean(process.env.TAVILY_API_KEY)
@@ -83,34 +83,32 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Field "message" is required and cannot be empty.' });
   }
 
-  // Set SSE Headers
-  res.setHeader('Content-Type', 'text/event-stream');
+  // Configure socket & SSE headers for real-time unbuffered delivery
+  req.socket.setNoDelay(true);
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
-  let isClientConnected = true;
-  req.on('close', () => {
-    isClientConnected = false;
+  let isClosed = false;
+  res.on('close', () => {
+    isClosed = true;
   });
 
   const sendEvent = (event: AgentEvent) => {
-    if (!isClientConnected) return;
+    if (isClosed || res.writableEnded || res.destroyed) return;
     res.write(`data: ${JSON.stringify(event)}\n\n`);
-    // Ensure immediate flush if flush method is available
-    if (typeof (res as any).flush === 'function') {
-      (res as any).flush();
-    }
   };
 
   try {
     await runAgent(message.trim(), sessionId, sendEvent);
   } catch (error: any) {
+    console.error('[SSE Server Error]:', error);
     sendEvent({ type: 'error', error: error?.message || 'Unexpected server error' });
     sendEvent({ type: 'done' });
   } finally {
-    if (isClientConnected) {
+    if (!res.writableEnded && !res.destroyed) {
       res.write('data: [DONE]\n\n');
       res.end();
     }

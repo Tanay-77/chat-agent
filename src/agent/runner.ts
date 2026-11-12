@@ -112,7 +112,7 @@ ${pastContext || 'No relevant past cross-session conversation memory detected.'}
 export async function runAgent(
   userMessage: string,
   sessionId: string = 'default-session',
-  onEvent: AgentEventCallback = () => {},
+  onEvent: AgentEventCallback = () => { },
   refDate: Date = new Date()
 ): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -124,7 +124,7 @@ export async function runAgent(
     return errorMsg;
   }
 
-  const modelName = process.env.MODEL_NAME || 'gemini-2.5-flash';
+  const modelName = process.env.MODEL_NAME || 'gemini-3.5-flash-lite';
   const now = refDate;
   const isoNow = now.toISOString();
 
@@ -184,8 +184,13 @@ export async function runAgent(
 
       let iterationText = '';
       const functionCalls: any[] = [];
+      let modelContent: any = null;
 
       for await (const chunk of responseStream) {
+        if (chunk.candidates?.[0]?.content) {
+          modelContent = chunk.candidates[0].content;
+        }
+
         if (chunk.functionCalls && chunk.functionCalls.length > 0) {
           for (const fc of chunk.functionCalls) {
             functionCalls.push(fc);
@@ -201,6 +206,18 @@ export async function runAgent(
 
       // Check if model requested tool execution
       if (functionCalls.length > 0) {
+        // Append model's original turn to contents to preserve thought signatures
+        if (modelContent) {
+          contents.push(modelContent);
+        } else {
+          contents.push({
+            role: 'model',
+            parts: functionCalls.map((fc) => ({ functionCall: fc }))
+          });
+        }
+
+        const responseParts: any[] = [];
+
         for (const call of functionCalls) {
           if (call.name === 'web_search') {
             const rawArgs = call.args as WebSearchArgs;
@@ -220,26 +237,30 @@ export async function runAgent(
               durationMs
             });
 
-            // Append model tool call to turn history
-            contents.push({
-              role: 'model',
-              parts: [{ functionCall: call }]
-            });
+            const funcResponseObj: any = {
+              name: call.name,
+              response: {
+                results: searchResults
+              }
+            };
+            if (call.id) {
+              funcResponseObj.id = call.id;
+            }
 
-            // Append tool response to turn history
-            contents.push({
-              role: 'tool',
-              parts: [{
-                functionResponse: {
-                  name: call.name,
-                  response: {
-                    results: searchResults
-                  }
-                }
-              }]
+            responseParts.push({
+              functionResponse: funcResponseObj
             });
           }
         }
+
+        // Append tool response turn to contents (in Gemini, role is 'user')
+        if (responseParts.length > 0) {
+          contents.push({
+            role: 'user',
+            parts: responseParts
+          });
+        }
+
         // Continue loop to allow model to synthesize search results
         continue;
       }

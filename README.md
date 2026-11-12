@@ -26,7 +26,7 @@ A high-performance chat agent in TypeScript on Node.js featuring persistent SQLi
 
 ### 4. Agent Loop & SSE Streaming API (`src/agent/runner.ts`, `src/index.ts`)
 - **Agent Loop (`src/agent/runner.ts`)**:
-  - Uses `@google/genai` (default: `gemini-2.5-flash`, configurable via `MODEL_NAME`).
+  - Uses `@google/genai` (default: `gemini-3.5-flash-lite`, configurable via `MODEL_NAME`).
   - Automatically persists user and assistant messages in SQLite.
   - Generates a 14-day relative calendar mapping in the system prompt so the LLM anchors dates accurately.
   - Executes a multi-turn tool calling loop (up to 4 iterations) emitting real-time event callbacks:
@@ -53,7 +53,7 @@ npm install
 ### 2. Configure Environment (`.env`)
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
-MODEL_NAME=gemini-2.5-flash
+MODEL_NAME=gemini-3.5-flash-lite
 TAVILY_API_KEY=your_tavily_api_key_here
 PORT=3000
 ```
