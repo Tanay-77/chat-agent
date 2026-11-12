@@ -108,7 +108,8 @@
 │  │  │  ├── content (TEXT)                      │                              │ │
 │  │  │  ├── created_at (ISO 8601, indexed)      │                              │ │
 │  │  │  ├── date_str (YYYY-MM-DD, indexed)      │                              │ │
-│  │  │  └── keywords (comma-separated entities) │                              │ │
+│  │  │  ├── keywords (comma-separated entities) │                              │ │
+│  │  │  └── is_demo (INTEGER, default 0, indexed│                              │ │
 │  │  └──────────────────────────────────────────┘                              │ │
 │  └─────────────────────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────────────────┘
@@ -212,10 +213,15 @@ The LLM and the pre-retrieval code agree on the same dates because they both der
 
 ---
 
-### 4. Dynamic Seed Dates: Why They're Relative
+### 4. Dynamic Seed Dates & Explicit Demo Seeding (`npm run seed:demo`)
 
-The seeded conversations use **relative date calculations**, not hardcoded dates:
+A production-grade system must not pollute cold databases with fabricated records. To guarantee data hygiene:
+1. **Empty by Default**: On server startup, a fresh SQLite database (`data/chat.db`) boots completely empty. No fabricated conversations are seeded automatically.
+2. **Explicit Demo Seeding (`npm run seed:demo`)**: Benchmark evaluation conversations are placed behind an explicit command.
+3. **Demo Isolation (`is_demo` column)**: The `messages` table schema includes an indexed `is_demo INTEGER NOT NULL DEFAULT 0` column. Seeded rows are flagged with `is_demo = 1`, while live user conversations always record `is_demo = 0`.
+4. **Empty Reset (`POST /api/reset`)**: Calling the reset endpoint immediately executes `clearDatabase()`, wiping all rows and returning the database to a clean, empty state (0 messages), never auto-reseeding behind the user's back.
 
+When demo conversations are seeded, they use **relative date calculations**, not hardcoded dates:
 - `"3 November"`: Uses the most recent November 3rd strictly in the past relative to `new Date()`.
 - `"Last Tuesday"`: Computes `(currentDayOfWeek - 2 + 7) % 7` with `diff === 0 ? 7 : diff`.
 - `"Monday"`: Computes `(currentDayOfWeek - 1 + 7) % 7` with the same zero-guard.
@@ -224,7 +230,29 @@ This means if an evaluator runs the app on December 1st, the seeded "last Tuesda
 
 ---
 
-### 5. SSE Streaming & Agent Trace
+### 5. Strict Anti-Fabrication Rule (No Conversation Hallucination)
+
+One of the most dangerous failure modes in LLM-based memory agents is **conversational hallucination**: when a user asks *"What did I ask on 3 November?"* or *"On Monday we shortlisted 5 CRM tools..."*, an unconstrained LLM will often invent a plausible-sounding past turn out of thin air.
+
+**Our solution: hard prompt constraints + negative assertions.**
+
+In `src/agent/runner.ts`, rule 5 of the system prompt enforces:
+```
+5. STRICT ANTI-FABRICATION RULE (NO CONVERSATION HALLUCINATION):
+   - If the user refers to a past conversation, prior discussion, shortlist, question, or specific date (e.g., "what did I ask on 3 November?", "on Monday we shortlisted...", "last Tuesday I asked you about..."), and the HISTORICAL CONVERSATION MEMORY section above is empty or does NOT contain any matching record of that conversation:
+     * You MUST explicitly state that you have no record of that prior conversation or question for that date/topic.
+     * Ask the user to share the details or provide context.
+     * You must NEVER invent, assume, simulate, or fabricate prior conversation content, previous questions, or past shortlists.
+```
+
+**Automated Verification**:
+Our test suite in `src/test.ts` validates this behavior against an empty database:
+- `Test (a)`: Empty DB + "What did I ask on 3 November?" → Verifies agent explicitly states it has no record of the prior conversation and does not invent Next.js or Claude versions.
+- `Test (b)`: Empty DB + "On Monday we shortlisted 5 CRM tools..." → Verifies agent states it has no record of the shortlist and asks the user to provide the shortlist details instead of hallucinating 5 CRM vendors.
+
+---
+
+### 6. SSE Streaming & Agent Trace
 
 The frontend consumes `POST /api/chat` as a Server-Sent Events stream. Each SSE frame is a JSON object:
 

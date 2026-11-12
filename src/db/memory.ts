@@ -12,6 +12,7 @@ export interface Message {
   created_at: string;
   date_str: string;
   keywords: string | null;
+  is_demo: number;
 }
 
 // Ensure database directory exists
@@ -38,7 +39,8 @@ db.exec(`
     content TEXT NOT NULL,
     created_at TEXT NOT NULL,
     date_str TEXT NOT NULL,
-    keywords TEXT
+    keywords TEXT,
+    is_demo INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
@@ -46,6 +48,19 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_messages_session_date ON messages(session_id, date_str);
   CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
 `);
+
+// Migration safeguard for existing databases
+try {
+  db.exec('ALTER TABLE messages ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0;');
+} catch {
+  // Column already exists
+}
+
+try {
+  db.exec('CREATE INDEX IF NOT EXISTS idx_messages_is_demo ON messages(is_demo);');
+} catch {
+  // Index already exists
+}
 
 /**
  * Inserts a new message into the persistent SQLite store.
@@ -55,16 +70,18 @@ export function insertMessage(
   role: MessageRole,
   content: string,
   createdAt?: string,
-  keywords?: string | null
+  keywords?: string | null,
+  isDemo: boolean = false
 ): Message {
   const finalCreatedAt = createdAt || new Date().toISOString();
   // Extract YYYY-MM-DD from ISO string or date
   const finalDateStr = finalCreatedAt.slice(0, 10);
   const finalKeywords = keywords ? keywords.trim() : null;
+  const isDemoVal = isDemo ? 1 : 0;
 
   const stmt = db.prepare(`
-    INSERT INTO messages (session_id, role, content, created_at, date_str, keywords)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (session_id, role, content, created_at, date_str, keywords, is_demo)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = stmt.run(
@@ -73,7 +90,8 @@ export function insertMessage(
     content,
     finalCreatedAt,
     finalDateStr,
-    finalKeywords
+    finalKeywords,
+    isDemoVal
   );
 
   return {
@@ -83,7 +101,8 @@ export function insertMessage(
     content,
     created_at: finalCreatedAt,
     date_str: finalDateStr,
-    keywords: finalKeywords
+    keywords: finalKeywords,
+    is_demo: isDemoVal
   };
 }
 
@@ -100,7 +119,7 @@ export function getRecentMessages(
   if (isWildcard) {
     const stmt = db.prepare(`
       SELECT * FROM (
-        SELECT id, session_id, role, content, created_at, date_str, keywords
+        SELECT id, session_id, role, content, created_at, date_str, keywords, is_demo
         FROM messages
         ORDER BY created_at DESC, id DESC
         LIMIT ?
@@ -111,7 +130,7 @@ export function getRecentMessages(
 
   const stmt = db.prepare(`
     SELECT * FROM (
-      SELECT id, session_id, role, content, created_at, date_str, keywords
+      SELECT id, session_id, role, content, created_at, date_str, keywords, is_demo
       FROM messages
       WHERE session_id = ?
       ORDER BY created_at DESC, id DESC
@@ -137,7 +156,7 @@ export function searchMessagesByDateRange(
 
   if (isWildcard) {
     const stmt = db.prepare(`
-      SELECT id, session_id, role, content, created_at, date_str, keywords
+      SELECT id, session_id, role, content, created_at, date_str, keywords, is_demo
       FROM messages
       WHERE date_str >= ? AND date_str <= ?
       ORDER BY created_at ASC, id ASC
@@ -146,7 +165,7 @@ export function searchMessagesByDateRange(
   }
 
   const stmt = db.prepare(`
-    SELECT id, session_id, role, content, created_at, date_str, keywords
+    SELECT id, session_id, role, content, created_at, date_str, keywords, is_demo
     FROM messages
     WHERE session_id = ? AND date_str >= ? AND date_str <= ?
     ORDER BY created_at ASC, id ASC
@@ -168,7 +187,7 @@ export function searchMessagesByKeyword(
 
   if (isWildcard) {
     const stmt = db.prepare(`
-      SELECT id, session_id, role, content, created_at, date_str, keywords
+      SELECT id, session_id, role, content, created_at, date_str, keywords, is_demo
       FROM messages
       WHERE (keywords LIKE ? OR content LIKE ?)
       ORDER BY created_at ASC, id ASC
@@ -177,7 +196,7 @@ export function searchMessagesByKeyword(
   }
 
   const stmt = db.prepare(`
-    SELECT id, session_id, role, content, created_at, date_str, keywords
+    SELECT id, session_id, role, content, created_at, date_str, keywords, is_demo
     FROM messages
     WHERE session_id = ? AND (keywords LIKE ? OR content LIKE ?)
     ORDER BY created_at ASC, id ASC
@@ -200,7 +219,7 @@ export function isDatabaseEmpty(): boolean {
  */
 export function getAllMessages(limit: number = 500): Message[] {
   const stmt = db.prepare(`
-    SELECT id, session_id, role, content, created_at, date_str, keywords
+    SELECT id, session_id, role, content, created_at, date_str, keywords, is_demo
     FROM messages
     ORDER BY created_at ASC, id ASC
     LIMIT ?
@@ -222,11 +241,13 @@ export function getDatabaseStats() {
   const totalStmt = db.prepare('SELECT COUNT(*) as total FROM messages');
   const sessionStmt = db.prepare('SELECT COUNT(DISTINCT session_id) as session_count FROM messages');
   const datesStmt = db.prepare('SELECT COUNT(DISTINCT date_str) as date_count FROM messages');
+  const demoStmt = db.prepare('SELECT COUNT(*) as demo_count FROM messages WHERE is_demo = 1');
 
   return {
     totalMessages: (totalStmt.get() as { total: number }).total,
     sessionsCount: (sessionStmt.get() as { session_count: number }).session_count,
-    datesCount: (datesStmt.get() as { date_count: number }).date_count
+    datesCount: (datesStmt.get() as { date_count: number }).date_count,
+    demoCount: (demoStmt.get() as { demo_count: number }).demo_count
   };
 }
 

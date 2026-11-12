@@ -6,10 +6,11 @@ A high-performance chat agent in TypeScript on Node.js featuring persistent SQLi
 
 ## Core Components
 
-### 1. SQLite Persistent Memory & Dynamic Seeding (`src/db/`)
+### 1. SQLite Persistent Memory & Explicit Demo Seeding (`src/db/`)
 - **Store (`src/db/memory.ts`)**: `better-sqlite3` at `data/chat.db` with WAL mode enabled.
-- **Indexes**: Indexed by `session_id`, `date_str` (`YYYY-MM-DD`), and `created_at`.
-- **Dynamic Relative Seeding (`src/db/seed.ts`)**: Automatically seeds 3 temporal conversations relative to `new Date()`:
+- **Indexes**: Indexed by `session_id`, `date_str` (`YYYY-MM-DD`), `created_at`, and `is_demo`.
+- **Empty Startup**: A fresh database starts completely empty on boot. No fabricated conversations are seeded automatically.
+- **Explicit Demo Seeding (`src/db/seed.ts` / `npm run seed:demo`)**: Demo conversations are moved behind an explicit CLI command and clearly tagged in SQLite with `is_demo = 1` (normal live turns use `is_demo = 0`):
   - **"3 November"**: Seeded on `${YYYY}-11-03T14:20:00Z` covering Next.js 15.0.1, Node.js v22.11.0 LTS, and Claude 3.5 Sonnet token pricing.
   - **"Last Tuesday"**: Resolves the previous Tuesday (1–7 days ago), seeding Postgres hosting details across Supabase, Neon, AWS RDS, Render, and Railway.
   - **"Monday"**: Resolves the most recent Monday (1–7 days ago), seeding a 20-person sales team CRM shortlist (HubSpot, Pipedrive, Attio, Close, Folk).
@@ -29,6 +30,7 @@ A high-performance chat agent in TypeScript on Node.js featuring persistent SQLi
   - Uses `@google/genai` (default: `gemini-3.5-flash-lite`, configurable via `MODEL_NAME`).
   - Automatically persists user and assistant messages in SQLite.
   - Generates a 14-day relative calendar mapping in the system prompt so the LLM anchors dates accurately.
+  - **Strict Anti-Fabrication Rule**: If the user refers to a past conversation, question, or shortlist and no matching history was retrieved from SQLite, the agent explicitly states that it has no record of it and asks for details. The agent is strictly prohibited from inventing prior conversation turns.
   - Executes a multi-turn tool calling loop (up to 4 iterations) emitting real-time event callbacks:
     - `{ type: 'status', message: '...' }`
     - `{ type: 'tool_start', queries: [...] }`
@@ -38,8 +40,8 @@ A high-performance chat agent in TypeScript on Node.js featuring persistent SQLi
 - **Streaming Endpoints (`src/index.ts`)**:
   - `POST /api/chat`: Streams real-time updates and response tokens via Server-Sent Events (`text/event-stream`).
   - `GET /api/history?sessionId=`: Returns conversation history with turns grouped by date (`groupedByDate`) and active session list.
-  - `POST /api/reset`: Resets SQLite memory back to canonical seed threads.
-  - `GET /health`: Inspects live database stats, uptime, and configured model.
+  - `POST /api/reset`: Clears SQLite memory to a completely empty DB state (0 messages).
+  - `GET /health`: Inspects live database stats (total messages, demo count, sessions), uptime, and configured model.
 
 ---
 
@@ -58,17 +60,23 @@ TAVILY_API_KEY=your_tavily_api_key_here
 PORT=3000
 ```
 
-### 3. Run Development Server
+### 3. (Optional) Populate Demo Conversations
+By default, the database boots completely empty. To populate the benchmark demo conversations (3 November versions, Last Tuesday Postgres, Monday CRM):
+```bash
+npm run seed:demo
+```
+
+### 4. Run Development Server
 ```bash
 npm run dev
 ```
 
-### 4. Run Test Suite
+### 5. Run Test Suite
 ```bash
 npm test
 ```
 
-### 5. Build for Production
+### 6. Build for Production
 ```bash
 npm run build
 npm start

@@ -97,7 +97,13 @@ ${pastContext || 'No relevant past cross-session conversation memory detected.'}
 4. FACTUAL CITATIONS & TONE:
    - Ground every live factual claim with markdown citations: \`[Source Title](url)\`.
    - If web search confirms no changes have occurred, state explicitly: "Pricing and limits for [Provider] remain unchanged since [Date] based on current official documentation [Source](url)."
-   - Maintain a concise, authoritative, professional, and well-structured response using Markdown tables or bullet points.`;
+   - Maintain a concise, authoritative, professional, and well-structured response using Markdown tables or bullet points.
+
+5. STRICT ANTI-FABRICATION RULE (NO CONVERSATION HALLUCINATION):
+   - If the user refers to a past conversation, prior discussion, shortlist, question, or specific date (e.g., "what did I ask on 3 November?", "on Monday we shortlisted...", "last Tuesday I asked you about..."), and the HISTORICAL CONVERSATION MEMORY section above is empty or does NOT contain any matching record of that conversation:
+     * You MUST explicitly state that you have no record of that prior conversation or question for that date/topic.
+     * Ask the user to share the details or provide context.
+     * You must NEVER invent, assume, simulate, or fabricate prior conversation content, previous questions, or past shortlists.`;
 }
 
 /**

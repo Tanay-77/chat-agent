@@ -170,7 +170,7 @@ export const App: React.FC = () => {
   };
 
   const handleResetDatabase = async () => {
-    if (!window.confirm('Reset SQLite database and re-seed canonical history?')) return;
+    if (!window.confirm('Clear all conversation history and reset SQLite database to empty state?')) return;
     try {
       setIsLoading(true);
       await fetch('/api/reset', { method: 'POST' });

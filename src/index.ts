@@ -12,11 +12,11 @@ import {
   searchMessagesByDateRange,
   searchMessagesByKeyword,
   insertMessage,
+  clearDatabase,
   MessageRole,
   Message,
   db
 } from './db/memory.js';
-import { seedDatabase } from './db/seed.js';
 import { runAgent, AgentEvent } from './agent/runner.js';
 import { buildClient } from './client/build.js';
 
@@ -34,14 +34,13 @@ if (!fs.existsSync(bundlePath)) {
 // Serve React SPA from public/
 app.use(express.static(path.resolve(process.cwd(), 'public')));
 
-// Auto-seed database on server boot if empty
+// Check persistent SQLite memory status (fresh DB starts empty)
 console.log('[Server] Checking persistent SQLite memory status...');
 if (isDatabaseEmpty()) {
-  console.log('[Server] Database is empty on boot. Executing dynamic auto-seed...');
-  seedDatabase(false);
+  console.log('[Server] Database is empty on boot. Ready for user sessions (or run `npm run seed:demo` to load demo history).');
 } else {
   const stats = getDatabaseStats();
-  console.log(`[Server] Persistent memory active: ${stats.totalMessages} messages (${stats.sessionsCount} sessions, ${stats.datesCount} dates).`);
+  console.log(`[Server] Persistent memory active: ${stats.totalMessages} messages (${stats.sessionsCount} sessions, ${stats.datesCount} dates, ${stats.demoCount} demo).`);
 }
 
 // ----------------------------------------------------
@@ -154,17 +153,16 @@ app.get('/api/history', (req: Request, res: Response) => {
 });
 
 // ----------------------------------------------------
-// POST /api/reset (Re-seed Memory to Canonical State)
+// POST /api/reset (Clear Database Memory to Empty State)
 // ----------------------------------------------------
 
 app.post('/api/reset', (_req: Request, res: Response) => {
   try {
-    const result = seedDatabase(true);
+    clearDatabase();
     const stats = getDatabaseStats();
     return res.json({
       success: true,
-      message: 'Database memory successfully reset and auto-seeded.',
-      seededCount: result.messages.length,
+      message: 'Database memory successfully cleared to empty state.',
       stats
     });
   } catch (error: any) {

@@ -116,8 +116,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className="reset-db-btn"
             onClick={onResetDatabase}
             disabled={isLoading}
+            title="Clear all stored messages to empty state"
           >
-            ↻ Reset &amp; Re-seed SQLite DB
+            ↻ Clear Database (Reset)
           </button>
         </section>
       </div>
