@@ -1,3 +1,5 @@
+import { Type, FunctionDeclaration } from '@google/genai';
+
 export interface WebSearchArgs {
   queries: string[];
   topic?: 'general' | 'news';
@@ -147,30 +149,29 @@ export async function executeWebSearch(args: WebSearchArgs): Promise<WebSearchRe
 /**
  * Gemini Function Declaration Schema for the web_search tool
  */
-export const webSearchToolDeclaration = {
+export const webSearchToolDeclaration: FunctionDeclaration = {
   name: 'web_search',
   description: 'Search the live web in parallel for up-to-date pricing, version releases, news, and factual verification. Supports multiple queries concurrently.',
   parameters: {
-    type: 'OBJECT',
+    type: Type.OBJECT,
     properties: {
       queries: {
-        type: 'ARRAY',
+        type: Type.ARRAY,
         items: {
-          type: 'STRING'
+          type: Type.STRING
         },
         description: 'Array of 1 to 6 specific, distinct search queries executed concurrently to cross-verify facts.'
       },
       topic: {
-        type: 'STRING',
+        type: Type.STRING,
         enum: ['general', 'news'],
         description: 'Optional category of search. Use "news" for recent product announcements or "general" for documentation and pricing.'
       },
       days_back: {
-        type: 'INTEGER',
+        type: Type.INTEGER,
         description: 'Optional time filter in days (e.g., 3, 7, 30) to restrict results to recent updates.'
       }
     },
     required: ['queries']
   }
 };
-

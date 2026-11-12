@@ -5,16 +5,18 @@ import {
   getRecentMessages,
   searchMessagesByDateRange,
   searchMessagesByKeyword,
-  getDatabaseStats
+  getDatabaseStats,
+  getAllMessages
 } from './db/memory.js';
 import { resolveTemporalContext } from './context/temporalResolver.js';
 import { webSearchToolDeclaration, executeWebSearch } from './tools/webSearch.js';
+import { buildCalendarReference, buildSystemPrompt, runAgent, AgentEvent } from './agent/runner.js';
 
 async function runTests() {
   console.log('=== Running Chat Agent Verification Suite ===\n');
 
   // 1. Seed & Memory Tests
-  console.log('[1/4] Testing Persistent Memory & Dynamic Seed...');
+  console.log('[1/5] Testing Persistent Memory & Dynamic Seed...');
   const seedResult = seedDatabase(true);
   if (seedResult.messages.length !== 6) {
     throw new Error(`Expected 6 seeded messages, got ${seedResult.messages.length}`);
@@ -38,7 +40,7 @@ async function runTests() {
   console.log('Memory layer tests passed.');
 
   // 2. Temporal Context Resolution Tests
-  console.log('\n[2/4] Testing Temporal Context Assembler...');
+  console.log('\n[2/5] Testing Temporal Context Assembler...');
 
   // Query 1: Monday CRM shortlist
   const q1 = "On Monday we shortlisted 5 CRM tools for a 20-person sales team. Has any of them changed pricing or shipped something big since?";
@@ -63,23 +65,66 @@ async function runTests() {
 
   console.log('Temporal resolver tests passed.');
 
-  // 3. Web Search Tool Schema Tests
-  console.log('\n[3/4] Testing Web Search Tool Schema...');
+  // 3. Calendar Reference & System Prompt Verification
+  console.log('\n[3/5] Testing Calendar Reference & System Prompt Builder...');
+  const now = new Date('2026-11-12T12:00:00Z');
+  const calRef = buildCalendarReference(now);
+  if (!calRef.includes('TODAY: Thursday, Nov 12, 2026')) {
+    throw new Error('Calendar reference does not correctly anchor today');
+  }
+  if (!calRef.includes('[TODAY]') || !calRef.includes('[YESTERDAY]')) {
+    throw new Error('Calendar reference missing relative mapping');
+  }
+
+  const prompt = buildSystemPrompt(now, res1.formattedContext);
+  if (!prompt.includes('TEMPORAL ACCURACY & RESOLUTION') || !prompt.includes('web_search')) {
+    throw new Error('System prompt missing required operational instructions');
+  }
+  console.log('Calendar reference & system prompt generation verified.');
+
+  // 4. Web Search Tool Schema Tests
+  console.log('\n[4/5] Testing Web Search Tool Schema...');
   if (webSearchToolDeclaration.name !== 'web_search') {
     throw new Error('Tool name must be web_search');
   }
-  if (!webSearchToolDeclaration.parameters.properties.queries) {
+  if (!webSearchToolDeclaration.parameters?.properties?.queries) {
     throw new Error('Tool schema missing queries parameter');
   }
   console.log('Web search tool schema valid.');
 
-  // 4. Web Search Execution Safety
-  console.log('\n[4/4] Testing Web Search Execution Safety...');
-  const searchResults = await executeWebSearch({
-    queries: ['Next.js release notes', 'Anthropic Claude token pricing'],
-    days_back: 7
-  });
-  console.log(`Web search handled safely (returned ${searchResults.length} items).`);
+  // 5. Agent Loop & History Verification
+  console.log('\n[5/5] Testing Agent Loop & Grouped History Structure...');
+  const events: AgentEvent[] = [];
+  const testSession = 'test-session-agent';
+
+  // Test runAgent (should handle gracefully if key is not yet set, or run if set)
+  await runAgent(
+    'On Monday we shortlisted 5 CRM tools. Any pricing changes?',
+    testSession,
+    (ev) => events.push(ev),
+    now
+  );
+
+  console.log(`Agent emitted ${events.length} events:`, events.map(e => e.type));
+  if (events.length === 0 || !events.some(e => e.type === 'done')) {
+    throw new Error('Agent failed to complete event lifecycle');
+  }
+
+  // Verify history grouped by date
+  const allMsgs = getAllMessages(100);
+  const groupedByDate: Record<string, typeof allMsgs> = {};
+  for (const m of allMsgs) {
+    if (!groupedByDate[m.date_str]) groupedByDate[m.date_str] = [];
+    groupedByDate[m.date_str].push(m);
+  }
+  const dateKeys = Object.keys(groupedByDate);
+  console.log(`History contains ${dateKeys.length} distinct dates:`, dateKeys);
+  if (dateKeys.length < 3) {
+    throw new Error('Expected at least 3 distinct dates in conversation history');
+  }
+
+  // Cleanup test session
+  db.prepare('DELETE FROM messages WHERE session_id = ?').run(testSession);
 
   console.log('\nAll tests passed successfully!');
 }
@@ -88,4 +133,3 @@ runTests().catch((err) => {
   console.error('Test suite failed:', err);
   process.exit(1);
 });
-
