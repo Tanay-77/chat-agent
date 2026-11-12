@@ -1,59 +1,42 @@
-# High-Performance Chat Agent (Stage 1)
+# High-Performance Chat Agent
 
-Stage 1 implementation of a high-performance, temporal-aware chat agent built with TypeScript, Node.js, Express, and SQLite (`better-sqlite3`).
-
----
-
-## Features (Stage 1)
-
-1. **Persistent SQLite Memory Layer (`src/db/memory.ts`)**:
-   - Stores all messages in `data/chat.db` with WAL mode enabled for high-throughput reads and concurrent writes.
-   - `messages` table schema:
-     - `id`: Auto-incrementing primary key
-     - `session_id`: Unique identifier per conversation thread
-     - `role`: `'user' | 'assistant'`
-     - `content`: Full message text
-     - `created_at`: ISO 8601 timestamp string
-     - `date_str`: `YYYY-MM-DD` indexed column for fast date filtering
-     - `keywords`: Comma-separated entities for semantic/entity search
-   - Core query helpers:
-     - `insertMessage(sessionId, role, content, createdAt?, keywords?)`
-     - `getRecentMessages(sessionId, limit = 15)`
-     - `searchMessagesByDateRange(sessionId, startDateStr, endDateStr)`
-     - `searchMessagesByKeyword(sessionId, keyword)`
-
-2. **Dynamic Auto-Seeding (`src/db/seed.ts`)**:
-   - Automatically executes on server startup if `data/chat.db` is empty.
-   - Dynamically calculates dates relative to `new Date()` so temporal references remain accurate regardless of when the evaluator runs the application:
-     - **"3 November"**: Seeded on `${YYYY}-11-03T14:20:00Z` covering Next.js 15.0.1, Node.js v22.11.0 LTS, and Claude 3.5 Sonnet token pricing.
-     - **"Last Tuesday"**: Dynamically resolves the previous Tuesday (1–7 days prior), seeding detailed hosting specs & pricing across Supabase, Neon, AWS RDS, Render, and Railway.
-     - **"Monday"**: Dynamically resolves the most recent Monday (1–7 days prior), seeding a 20-person sales team shortlist for HubSpot, Pipedrive, Attio, Close, and Folk with per-seat pricing and features.
-
-3. **Server & Health Endpoints (`src/server.ts`)**:
-   - Express server on `PORT` (default 3000).
-   - `/health`: Inspect uptime and live SQLite database stats.
-   - `/api/messages`: Query messages by date range, keyword, or session.
-   - `/api/seed`: Re-seed database on demand.
+A high-performance chat agent in TypeScript on Node.js featuring persistent SQLite memory, dynamic temporal context pre-retrieval, and batched parallel live web search.
 
 ---
 
-## Setup & Quick Start
+## Core Components
+
+### 1. SQLite Persistent Memory & Auto-Seeding (`src/db/`)
+- **Store (`src/db/memory.ts`)**: `better-sqlite3` at `data/chat.db` with WAL mode enabled.
+- **Indexes**: Indexed by `session_id`, `date_str` (`YYYY-MM-DD`), and `created_at`.
+- **Dynamic Seeding (`src/db/seed.ts`)**: Automatically seeds 3 temporal conversations relative to `new Date()`:
+  - **"3 November"**: Seeded on `${YYYY}-11-03T14:20:00Z` covering Next.js, Node.js LTS, and Claude 3.5 Sonnet token pricing.
+  - **"Last Tuesday"**: Resolves the previous Tuesday (1–7 days ago), seeding Postgres hosting details (Supabase, Neon, AWS RDS, Render, Railway).
+  - **"Monday"**: Resolves the most recent Monday (1–7 days ago), seeding a 20-person CRM shortlist (HubSpot, Pipedrive, Attio, Close, Folk).
+
+### 2. Temporal Context Assembler (`src/context/temporalResolver.ts`)
+- **Pre-Retrieval Pipeline**: Conversation memory retrieval happens before the LLM tool loop.
+- Deterministically parses explicit dates ("3 November", "YYYY-MM-DD"), relative days ("Monday", "last Tuesday", "yesterday"), and entity keywords ("CRM", "Postgres", "shortlisted").
+- Queries historical cross-session turns and formats them into a structured context block (`retrievedPastContext`) with exact timestamps and roles for system prompt injection.
+
+### 3. Batched Parallel Web Search Tool (`src/tools/webSearch.ts`)
+- Strictly ONE LLM tool: `web_search`.
+- Accepts `queries: string[]` (1 to 6 concurrent queries executed via `Promise.all`), `topic?: 'general' | 'news'`, and `days_back?: number`.
+- Connects to Tavily Search API with 8-second request timeout (`AbortController`), automatic retry, URL deduplication, and clean snippet extraction.
+
+---
+
+## Quick Start
 
 ### 1. Install Dependencies
 ```bash
 npm install
 ```
 
-### 2. Configure Environment
-Copy `.env.example` to `.env`:
-```bash
-cp .env.example .env
-```
-Ensure `.env` contains:
+### 2. Configure Environment (`.env`)
 ```env
-GROQ_API_KEY=
-OPENAI_API_KEY=
-TAVILY_API_KEY=
+GEMINI_API_KEY=your_gemini_api_key_here
+TAVILY_API_KEY=your_tavily_api_key_here
 PORT=3000
 ```
 
@@ -62,8 +45,7 @@ PORT=3000
 npm run dev
 ```
 
-### 4. Run Memory Tests & Verification
+### 4. Run Test Suite
 ```bash
 npm test
 ```
-

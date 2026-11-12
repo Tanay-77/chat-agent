@@ -37,7 +37,6 @@ app.get('/health', (_req: Request, res: Response) => {
   const stats = getDatabaseStats();
   res.json({
     status: 'ok',
-    stage: 'Stage 1: Project Scaffolding, Persistent SQLite Memory, and Auto-Seeding',
     timestamp: new Date().toISOString(),
     uptimeSeconds: process.uptime(),
     database: {
@@ -51,7 +50,7 @@ app.get('/health', (_req: Request, res: Response) => {
 app.get('/', (_req: Request, res: Response) => {
   res.json({
     service: 'High-Performance Chat Agent',
-    version: '1.0.0 (Stage 1)',
+    version: '1.0.0',
     health: '/health',
     endpoints: {
       getMessages: 'GET /api/messages?sessionId=&startDate=&endDate=&keyword=&limit=',
