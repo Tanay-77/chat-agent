@@ -1,6 +1,8 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+import path from 'node:path';
+import fs from 'node:fs';
 import express, { Request, Response } from 'express';
 import {
   isDatabaseEmpty,
@@ -16,11 +18,21 @@ import {
 } from './db/memory.js';
 import { seedDatabase } from './db/seed.js';
 import { runAgent, AgentEvent } from './agent/runner.js';
+import { buildClient } from './client/build.js';
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json());
+
+// Ensure React client bundle is compiled
+const bundlePath = path.resolve(process.cwd(), 'public/bundle.js');
+if (!fs.existsSync(bundlePath)) {
+  await buildClient(false);
+}
+
+// Serve React SPA from public/
+app.use(express.static(path.resolve(process.cwd(), 'public')));
 
 // Auto-seed database on server boot if empty
 console.log('[Server] Checking persistent SQLite memory status...');
@@ -56,17 +68,8 @@ app.get('/health', (_req: Request, res: Response) => {
 });
 
 app.get('/', (_req: Request, res: Response) => {
-  res.json({
-    service: 'High-Performance Temporal Chat Agent',
-    version: '1.0.0',
-    health: '/health',
-    endpoints: {
-      chatSSE: 'POST /api/chat',
-      history: 'GET /api/history?sessionId=',
-      reset: 'POST /api/reset',
-      messages: 'GET /api/messages?sessionId=&startDate=&endDate=&keyword=&limit='
-    }
-  });
+  // Serve React SPA - falls through to express.static
+  res.sendFile(path.resolve(process.cwd(), 'public', 'index.html'));
 });
 
 // ----------------------------------------------------
