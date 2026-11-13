@@ -138,6 +138,7 @@ export interface RunAgentOptions {
   forceSequentialSearch?: boolean;
   thinkingBudget?: number;
   timezone?: string;
+  userId?: string;
 }
 
 /**
@@ -166,15 +167,16 @@ export async function runAgent(
   }
 
   const modelName = process.env.MODEL_NAME || 'gemini-3.1-flash-lite';
-  const effectiveTz = options.timezone || getUserTimezone(sessionId) || 'UTC';
+  const effectiveUserId = options.userId || 'default-user';
+  const effectiveTz = options.timezone || getUserTimezone(effectiveUserId) || getUserTimezone(sessionId) || 'UTC';
   const now = refDate;
   const isoNow = now.toISOString();
 
   // 1. Save incoming user message to SQLite (computing date_str in user timezone)
-  insertMessage(sessionId, 'user', userMessage, isoNow, null, false, effectiveTz);
+  insertMessage(sessionId, 'user', userMessage, isoNow, null, false, effectiveTz, effectiveUserId);
 
   // 2. Pre-Retrieval Context Resolution (before LLM call)
-  const temporalRes = resolveTemporalContext(userMessage, sessionId, now, MAX_CONTEXT_CHARS, effectiveTz);
+  const temporalRes = resolveTemporalContext(userMessage, sessionId, now, MAX_CONTEXT_CHARS, effectiveTz, effectiveUserId);
   if (temporalRes.matchedMessages.length > 0) {
     const datesDesc = temporalRes.detectedDates.length > 0
       ? temporalRes.detectedDates.join(', ')
@@ -189,7 +191,7 @@ export async function runAgent(
   const systemPrompt = buildSystemPrompt(now, temporalRes.formattedContext, effectiveTz);
 
   // Fetch recent messages for active session context (last 10 turns)
-  const recentTurns = getRecentMessages(sessionId, 10);
+  const recentTurns = getRecentMessages(sessionId, 10, effectiveUserId);
 
   // Build initial contents for Gemini SDK
   const contents: any[] = [];
@@ -379,7 +381,7 @@ export async function runAgent(
     }
 
     // 4. Save final assistant response to SQLite (computing date_str in user timezone)
-    insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz);
+    insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz, effectiveUserId);
     onEvent({ type: 'done' });
     return finalAnswer;
 

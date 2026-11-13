@@ -75,15 +75,19 @@ export function calculateRelativeDates(refDate: Date = new Date()): RelativeDate
 /**
  * Seeds the database with the 3 canonical temporal conversation threads.
  */
-export function seedDatabase(force: boolean = false, refDate: Date = new Date()): { seeded: boolean; messages: Message[] } {
-  if (!force && !isDatabaseEmpty()) {
-    console.log('[Seed] Database already contains messages. Skipping automatic seeding.');
+export function seedDatabase(
+  force: boolean = false,
+  refDate: Date = new Date(),
+  userId: string = 'default-user'
+): { seeded: boolean; messages: Message[] } {
+  if (!force && !isDatabaseEmpty(userId)) {
+    console.log('[Seed] Database already contains messages for user. Skipping automatic seeding.');
     return { seeded: false, messages: [] };
   }
 
   if (force) {
-    console.log('[Seed] Force seeding enabled. Clearing existing records...');
-    clearDatabase();
+    console.log(`[Seed] Force seeding enabled for user ${userId}. Clearing existing records...`);
+    clearDatabase(userId);
   }
 
   console.log(`[Seed] Calculating dynamic dates relative to: ${refDate.toISOString()}...`);
@@ -106,7 +110,9 @@ export function seedDatabase(force: boolean = false, refDate: Date = new Date())
     'What is the latest stable release version of Next.js and Node.js LTS, and what are the current API token rates for Claude 3.5 Sonnet?',
     dates.nov3.userIso,
     'Next.js, Node.js, LTS, Claude 3.5 Sonnet, Anthropic, API pricing, token rates, versions',
-    true // is_demo = 1
+    true, // is_demo = 1
+    undefined,
+    userId
   );
   insertedMessages.push(nov3User);
 
@@ -131,7 +137,9 @@ export function seedDatabase(force: boolean = false, refDate: Date = new Date())
    - Context window: 200,000 tokens with max output of 8,192 tokens.`,
     dates.nov3.assistantIso,
     'Next.js, Node.js, LTS, Claude 3.5 Sonnet, Anthropic, API pricing, token rates, versions',
-    true // is_demo = 1
+    true, // is_demo = 1
+    undefined,
+    userId
   );
   insertedMessages.push(nov3Assistant);
 
@@ -145,7 +153,9 @@ export function seedDatabase(force: boolean = false, refDate: Date = new Date())
     'Can you compare managed Postgres hosting across Supabase, Neon, AWS RDS, Render, and Railway? We need exact tier pricing, compute/vCPU, RAM, and storage limits for our production setup.',
     dates.lastTuesday.userIso,
     'Postgres, PostgreSQL hosting, Supabase, Neon, AWS RDS, Render, Railway, pricing, compute, storage limits, database',
-    true // is_demo = 1
+    true, // is_demo = 1
+    undefined,
+    userId
   );
   insertedMessages.push(tueUser);
 
@@ -189,7 +199,9 @@ export function seedDatabase(force: boolean = false, refDate: Date = new Date())
    - Specs: Scales up to 32 vCPUs and 64 GB RAM seamlessly.`,
     dates.lastTuesday.assistantIso,
     'Postgres, PostgreSQL hosting, Supabase, Neon, AWS RDS, Render, Railway, pricing, compute, storage limits, database',
-    true // is_demo = 1
+    true, // is_demo = 1
+    undefined,
+    userId
   );
   insertedMessages.push(tueAssistant);
 
@@ -203,7 +215,9 @@ export function seedDatabase(force: boolean = false, refDate: Date = new Date())
     'We need to shortlist 5 CRM tools for a 20-person sales team. Can you provide the top options, their exact per-seat pricing, monthly costs for 20 seats, and standout features?',
     dates.recentMonday.userIso,
     'CRM, sales team, 20 seats, HubSpot, Pipedrive, Attio, Close, Folk, pricing, shortlist, comparison',
-    true // is_demo = 1
+    true, // is_demo = 1
+    undefined,
+    userId
   );
   insertedMessages.push(crmUser);
 
@@ -243,12 +257,14 @@ export function seedDatabase(force: boolean = false, refDate: Date = new Date())
    - Key Features: Notion-like lightweight CRM flexibility, Chrome extension to clip LinkedIn contacts, contact deduplication, smart pipeline views, personalized bulk mail merge with AI variables, and frictionless team sharing.`,
     dates.recentMonday.assistantIso,
     'CRM, sales team, 20 seats, HubSpot, Pipedrive, Attio, Close, Folk, pricing, shortlist, comparison',
-    true // is_demo = 1
+    true, // is_demo = 1
+    undefined,
+    userId
   );
   insertedMessages.push(crmAssistant);
 
-  const stats = getDatabaseStats();
-  console.log(`[Seed] Database seeded successfully! (${stats.totalMessages} messages across ${stats.sessionsCount} sessions and ${stats.datesCount} distinct dates)`);
+  const stats = getDatabaseStats(userId);
+  console.log(`[Seed] Database seeded successfully for user ${userId}! (${stats.totalMessages} messages across ${stats.sessionsCount} sessions and ${stats.datesCount} distinct dates)`);
 
   return { seeded: true, messages: insertedMessages };
 }

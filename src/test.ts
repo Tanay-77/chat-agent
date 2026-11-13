@@ -19,13 +19,14 @@ import {
   TAVILY_PUBLISH_DATE_NOTE
 } from './tools/webSearch.js';
 import { buildCalendarReference, buildSystemPrompt, runAgent, AgentEvent } from './agent/runner.js';
+import { signCookieValue, unsignCookieValue, parseCookies, USER_COOKIE_NAME } from './index.js';
 
 async function runTests() {
   console.log('=== Running Chat Agent Verification Suite ===\n');
   const now = new Date('2026-11-12T12:00:00Z');
 
   // 1. Seed & Memory Tests (with is_demo validation)
-  console.log('[1/6] Testing Persistent Memory, Demo Tagging & Database Clearing...');
+  console.log('[1/7] Testing Persistent Memory, Demo Tagging & Database Clearing...');
   const seedResult = seedDatabase(true, now);
   if (seedResult.messages.length !== 6) {
     throw new Error(`Expected 6 seeded messages, got ${seedResult.messages.length}`);
@@ -76,7 +77,7 @@ async function runTests() {
   console.log('Memory layer tests & FTS5 BM25 verification passed.');
 
   // 2. Temporal Context Resolution Tests
-  console.log('\n[2/6] Testing Temporal Context Assembler with FTS5 BM25...');
+  console.log('\n[2/7] Testing Temporal Context Assembler with FTS5 BM25...');
 
   // Query 1: Monday CRM shortlist
   const q1 = "On Monday we shortlisted 5 CRM tools for a 20-person sales team. Has any of them changed pricing or shipped something big since?";
@@ -421,7 +422,7 @@ async function runTests() {
   console.log('Temporal resolver tests passed.');
 
   // 3. Calendar Reference & System Prompt Verification
-  console.log('\n[3/6] Testing Calendar Reference & System Prompt Builder...');
+  console.log('\n[3/7] Testing Calendar Reference & System Prompt Builder...');
   const calRef = buildCalendarReference(now);
   if (!calRef.includes('TODAY: Thursday, Nov 12, 2026')) {
     throw new Error('Calendar reference does not correctly anchor today');
@@ -446,7 +447,7 @@ async function runTests() {
   console.log('Calendar reference & system prompt generation verified.');
 
   // 4. Web Search Tool Schema Tests
-  console.log('\n[4/6] Testing Web Search Tool Schema...');
+  console.log('\n[4/7] Testing Web Search Tool Schema...');
   if (webSearchToolDeclaration.name !== 'web_search') {
     throw new Error('Tool name must be web_search');
   }
@@ -465,7 +466,7 @@ async function runTests() {
   console.log('Web search tool schema valid (days_back removed, start_date supported, publish date note verified).');
 
   // 5. Agent Loop & History Verification with Seeded Data
-  console.log('\n[5/6] Testing Agent Loop & Grouped History Structure (Seeded DB)...');
+  console.log('\n[5/7] Testing Agent Loop & Grouped History Structure (Seeded DB)...');
   const events: AgentEvent[] = [];
   const testSession = 'test-session-agent';
 
@@ -495,7 +496,7 @@ async function runTests() {
   }
 
   // 6. Anti-Fabrication & Empty DB Verification Tests
-  console.log('\n[6/6] Testing Anti-Fabrication Behavior on Empty Database...');
+  console.log('\n[6/7] Testing Anti-Fabrication Behavior on Empty Database...');
   
   // Clear the database completely to represent fresh DB or POST /api/reset
   clearDatabase();
@@ -580,7 +581,193 @@ async function runTests() {
   clearDatabase();
 
   console.log('  ✓ Test (b) PASSED: Agent refused to fabricate past turns without memory.');
-  console.log('\nAll 6 test suites passed successfully!');
+
+  // 7. Multi-Tenant User Isolation & Signed Cookie Security
+  console.log('\n[7/7] Testing Multi-Tenant User Isolation & Signed Cookie Security...');
+
+  // A. Signed Cookie tests
+  const testSecret = 'test-secret-key-for-cookies-123456';
+  const testUuid = 'b73d2a01-8b29-4d64-9b81-c7526978411d';
+  const signedCookie = signCookieValue(testUuid, testSecret);
+  if (!signedCookie.startsWith(`s:${testUuid}.`)) {
+    throw new Error(`signCookieValue format invalid: ${signedCookie}`);
+  }
+
+  const unsigned = unsignCookieValue(signedCookie, testSecret);
+  if (unsigned !== testUuid) {
+    throw new Error(`unsignCookieValue failed to extract UUID. Expected ${testUuid}, got ${unsigned}`);
+  }
+
+  // Tampered cookie signature
+  const tamperedCookie = signedCookie.slice(0, -3) + 'xyz';
+  if (unsignCookieValue(tamperedCookie, testSecret) !== false) {
+    throw new Error('unsignCookieValue should return false for tampered signature');
+  }
+
+  // Tampered payload
+  const tamperedPayload = 's:c73d2a01-8b29-4d64-9b81-c7526978411e.' + signedCookie.split('.')[1];
+  if (unsignCookieValue(tamperedPayload, testSecret) !== false) {
+    throw new Error('unsignCookieValue should return false for modified payload with original signature');
+  }
+
+  // Unsigned cookie
+  if (unsignCookieValue(testUuid, testSecret) !== false) {
+    throw new Error('unsignCookieValue should return false for raw unsigned UUID');
+  }
+
+  // parseCookies helper
+  const parsed = parseCookies(`other=123; ${USER_COOKIE_NAME}=${encodeURIComponent(signedCookie)}; theme=dark`);
+  if (parsed[USER_COOKIE_NAME] !== signedCookie) {
+    throw new Error(`parseCookies failed to extract cookie value: got ${parsed[USER_COOKIE_NAME]}`);
+  }
+  console.log('  ✓ Signed Cookie cryptographic signing, verification, and tamper detection passed.');
+
+  // B. Database scoping & user isolation: User A vs User B
+  const userA = 'user-alice-' + Date.now();
+  const userB = 'user-bob-' + Date.now();
+
+  // Clear any existing messages for both test users
+  clearDatabase(userA);
+  clearDatabase(userB);
+
+  // User A conversations across 2 different sessions (cross-session)
+  insertMessage('session-alice-1', 'user', 'Project Apollo: Flight booked to Tokyo on 3 November', '2026-11-03T10:00:00Z', null, false, 'UTC', userA);
+  insertMessage('session-alice-1', 'assistant', 'Confirmed your flight to Tokyo on 3 November under Project Apollo.', '2026-11-03T10:01:00Z', null, false, 'UTC', userA);
+  insertMessage('session-alice-2', 'user', 'Project Apollo: Secret budget allocation is $50,000.', '2026-11-04T12:00:00Z', null, false, 'UTC', userA);
+
+  // User B conversations across 2 different sessions (cross-session)
+  insertMessage('session-bob-1', 'user', 'Project Zeus: Quantum computing lab test on 3 November', '2026-11-03T10:00:00Z', null, false, 'UTC', userB);
+  insertMessage('session-bob-1', 'assistant', 'Logged quantum test results for Project Zeus.', '2026-11-03T10:01:00Z', null, false, 'UTC', userB);
+  insertMessage('session-bob-2', 'user', 'Project Zeus: Hotel reservation in Berlin confirmed.', '2026-11-04T14:00:00Z', null, false, 'UTC', userB);
+
+  // 1. Cross-session retrieval for user A
+  const aliceCrossSession = getRecentMessages(null, 50, userA);
+  if (aliceCrossSession.length !== 3) {
+    throw new Error(`Expected User A to have 3 cross-session messages, got ${aliceCrossSession.length}`);
+  }
+  for (const m of aliceCrossSession) {
+    if (m.user_id !== userA) {
+      throw new Error(`Data leak! User A cross-session retrieval contained user_id ${m.user_id}`);
+    }
+    if (m.content.includes('Zeus') || m.content.includes('Berlin') || m.session_id.includes('bob')) {
+      throw new Error(`Data leak! User A retrieved User B content: "${m.content}"`);
+    }
+  }
+
+  // 2. Cross-session retrieval for user B
+  const bobCrossSession = getRecentMessages(null, 50, userB);
+  if (bobCrossSession.length !== 3) {
+    throw new Error(`Expected User B to have 3 cross-session messages, got ${bobCrossSession.length}`);
+  }
+  for (const m of bobCrossSession) {
+    if (m.user_id !== userB) {
+      throw new Error(`Data leak! User B cross-session retrieval contained user_id ${m.user_id}`);
+    }
+    if (m.content.includes('Apollo') || m.content.includes('Tokyo') || m.session_id.includes('alice')) {
+      throw new Error(`Data leak! User B retrieved User A content: "${m.content}"`);
+    }
+  }
+  console.log('  ✓ Cross-session retrieval is fully isolated between User A and User B.');
+
+  // 3. Date range search isolation
+  const aliceDateRange = searchMessagesByDateRange(null, '2026-11-01', '2026-11-05', userA);
+  if (aliceDateRange.length !== 3) {
+    throw new Error(`User A date range search expected 3 messages, got ${aliceDateRange.length}`);
+  }
+  if (aliceDateRange.some(m => m.user_id !== userA || m.content.includes('Zeus'))) {
+    throw new Error('User A date range search leaked User B data!');
+  }
+
+  const bobDateRange = searchMessagesByDateRange(null, '2026-11-01', '2026-11-05', userB);
+  if (bobDateRange.length !== 3) {
+    throw new Error(`User B date range search expected 3 messages, got ${bobDateRange.length}`);
+  }
+  if (bobDateRange.some(m => m.user_id !== userB || m.content.includes('Apollo'))) {
+    throw new Error('User B date range search leaked User A data!');
+  }
+  console.log('  ✓ Date range queries strictly isolated by user_id.');
+
+  // 4. FTS5 BM25 search isolation
+  const bobSearchApollo = searchMessagesFTS('Apollo', { userId: userB });
+  if (bobSearchApollo.length !== 0) {
+    throw new Error(`Security breach! User B FTS search for "Apollo" returned ${bobSearchApollo.length} messages from User A!`);
+  }
+
+  const aliceSearchApollo = searchMessagesFTS('Apollo', { userId: userA });
+  if (aliceSearchApollo.length === 0) {
+    throw new Error('User A FTS search for "Apollo" should return Alice messages.');
+  }
+  if (aliceSearchApollo.some(m => m.user_id !== userA)) {
+    throw new Error('User A FTS search returned messages from another user!');
+  }
+
+  const aliceSearchZeus = searchMessagesFTS('Zeus', { userId: userA });
+  if (aliceSearchZeus.length !== 0) {
+    throw new Error(`Security breach! User A FTS search for "Zeus" returned ${aliceSearchZeus.length} messages from User B!`);
+  }
+
+  const bobSearchZeus = searchMessagesFTS('Zeus', { userId: userB });
+  if (bobSearchZeus.length === 0) {
+    throw new Error('User B FTS search for "Zeus" should return Bob messages.');
+  }
+  if (bobSearchZeus.some(m => m.user_id !== userB)) {
+    throw new Error('User B FTS search returned messages from another user!');
+  }
+  console.log('  ✓ FTS5 BM25 searches strictly isolated by user_id.');
+
+  // 5. Temporal resolver isolation
+  const aliceResolved = resolveTemporalContext(
+    'What flight did I book on 3 November?',
+    'session-alice-new',
+    now,
+    MAX_CONTEXT_CHARS,
+    'UTC',
+    userA
+  );
+  if (aliceResolved.matchedMessages.length === 0 || !aliceResolved.matchedMessages.some(m => m.content.includes('Tokyo'))) {
+    throw new Error('User A temporal resolution failed to retrieve Alice flight.');
+  }
+  if (aliceResolved.matchedMessages.some(m => m.content.includes('Zeus') || m.user_id !== userA)) {
+    throw new Error('User A temporal resolution leaked User B messages!');
+  }
+
+  const bobResolved = resolveTemporalContext(
+    'What flight did I book on 3 November?',
+    'session-bob-new',
+    now,
+    MAX_CONTEXT_CHARS,
+    'UTC',
+    userB
+  );
+  if (bobResolved.matchedMessages.some(m => m.content.includes('Tokyo') || m.content.includes('Apollo') || m.user_id === userA)) {
+    throw new Error('Security breach! User B temporal resolution retrieved User A flight details!');
+  }
+  console.log('  ✓ Temporal resolution is strictly scoped to the requesting user_id.');
+
+  // 6. Per-user database clearing & stats
+  clearDatabase(userA);
+  const aliceStatsAfterClear = getDatabaseStats(userA);
+  if (aliceStatsAfterClear.totalMessages !== 0) {
+    throw new Error(`Expected User A to have 0 messages after clearDatabase(userA), got ${aliceStatsAfterClear.totalMessages}`);
+  }
+
+  const bobStatsAfterAliceClear = getDatabaseStats(userB);
+  if (bobStatsAfterAliceClear.totalMessages !== 3) {
+    throw new Error(`User B messages were inadvertently deleted by User A clear! Expected 3, got ${bobStatsAfterAliceClear.totalMessages}`);
+  }
+  const bobRemaining = getAllMessages(10, userB);
+  if (bobRemaining.length !== 3 || bobRemaining.some(m => m.user_id !== userB)) {
+    throw new Error('User B data corrupted after User A clearDatabase!');
+  }
+
+  // Clean up Bob
+  clearDatabase(userB);
+  if (getDatabaseStats(userB).totalMessages !== 0) {
+    throw new Error('Failed to clear User B messages.');
+  }
+  console.log('  ✓ Per-user clearDatabase(userId) cleanly isolates deletion.');
+
+  console.log('\nAll 7 test suites passed successfully!');
 }
 
 runTests().catch((err) => {

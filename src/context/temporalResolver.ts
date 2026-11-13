@@ -271,9 +271,10 @@ export function resolveTemporalContext(
   sessionId: string,
   now: Date = new Date(),
   maxChars: number = MAX_CONTEXT_CHARS,
-  tz?: string
+  tz?: string,
+  userId: string = 'default-user'
 ): RetrievedContextResult {
-  const effectiveTz = tz || getUserTimezone(sessionId) || 'UTC';
+  const effectiveTz = tz || getUserTimezone(userId) || getUserTimezone(sessionId) || 'UTC';
   const parsedDates = parseDates(userMessage, now, effectiveTz);
 
   // Flatten unique dates (expanding date ranges if applicable)
@@ -302,18 +303,19 @@ export function resolveTemporalContext(
 
   const messageMap = new Map<number, Message>();
 
-  // 1. Date-range filtered retrieval
+  // 1. Date-range filtered retrieval scoped to user_id
   for (const dateStr of allDetectedDates) {
     const dateFtsMessages = searchMessagesFTS(userMessage, {
       startDateStr: dateStr,
       endDateStr: dateStr,
-      limit: 10
+      limit: 10,
+      userId
     });
     for (const msg of dateFtsMessages) {
       messageMap.set(msg.id, msg);
     }
 
-    const dateAllMessages = searchMessagesByDateRange(null, dateStr, dateStr);
+    const dateAllMessages = searchMessagesByDateRange(null, dateStr, dateStr, userId);
     for (const msg of dateAllMessages) {
       if (!messageMap.has(msg.id)) {
         messageMap.set(msg.id, { ...msg, rank: 0 });
@@ -321,8 +323,8 @@ export function resolveTemporalContext(
     }
   }
 
-  // 2. Cross-session FTS search across all dates
-  const ftsMessages = searchMessagesFTS(userMessage, { limit: 20 });
+  // 2. Cross-session FTS search across all dates scoped to user_id
+  const ftsMessages = searchMessagesFTS(userMessage, { limit: 20, userId });
   for (const msg of ftsMessages) {
     const existing = messageMap.get(msg.id);
     if (!existing) {
@@ -332,9 +334,9 @@ export function resolveTemporalContext(
     }
   }
 
-  // 3. Fallback: conversational recall phrasing
+  // 3. Fallback: conversational recall phrasing scoped to user_id
   if (messageMap.size === 0 && /\b(asked you|we shortlisted|we discussed|shortlisted|remember)\b/i.test(userMessage)) {
-    const recent = getRecentMessages(null, 6);
+    const recent = getRecentMessages(null, 6, userId);
     for (const msg of recent) {
       messageMap.set(msg.id, { ...msg, rank: 0 });
     }

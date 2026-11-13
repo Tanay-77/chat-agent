@@ -3,6 +3,7 @@ dotenv.config();
 
 import path from 'node:path';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import express, { Request, Response } from 'express';
 import {
   isDatabaseEmpty,
@@ -22,10 +23,97 @@ import { clearSearchCache } from './tools/webSearch.js';
 import { setUserTimezone } from './context/temporalResolver.js';
 import { buildClient } from './client/build.js';
 
+// ----------------------------------------------------
+// Signed Cookie Management & User Isolation
+// ----------------------------------------------------
+
+export const COOKIE_SECRET = process.env.COOKIE_SECRET || 'chat-agent-secret-key-32-chars-long!!';
+export const USER_COOKIE_NAME = 'user_id';
+
+declare global {
+  namespace Express {
+    interface Request {
+      userId: string;
+    }
+  }
+}
+
+/**
+ * Signs a cookie value using HMAC-SHA256 (format: `s:<val>.<sig>`).
+ */
+export function signCookieValue(val: string, secret: string = COOKIE_SECRET): string {
+  const hmac = crypto.createHmac('sha256', secret).update(val).digest('base64url');
+  return `s:${val}.${hmac}`;
+}
+
+/**
+ * Validates and unsigns a cookie value. Returns the original string or false if invalid/tampered.
+ */
+export function unsignCookieValue(input: string, secret: string = COOKIE_SECRET): string | false {
+  if (!input || !input.startsWith('s:')) return false;
+  const raw = input.slice(2);
+  const lastDot = raw.lastIndexOf('.');
+  if (lastDot === -1) return false;
+  const val = raw.slice(0, lastDot);
+  const signature = raw.slice(lastDot + 1);
+  const expectedSig = crypto.createHmac('sha256', secret).update(val).digest('base64url');
+
+  const sigBuf = Buffer.from(signature);
+  const expBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expBuf.length) return false;
+  if (!crypto.timingSafeEqual(sigBuf, expBuf)) return false;
+  return val;
+}
+
+/**
+ * Parses raw Cookie header string into a key-value dictionary.
+ */
+export function parseCookies(cookieHeader?: string): Record<string, string> {
+  const cookies: Record<string, string> = {};
+  if (!cookieHeader) return cookies;
+  const pairs = cookieHeader.split(';');
+  for (const pair of pairs) {
+    const idx = pair.indexOf('=');
+    if (idx === -1) continue;
+    const key = pair.slice(0, idx).trim();
+    const val = pair.slice(idx + 1).trim();
+    try {
+      cookies[key] = decodeURIComponent(val);
+    } catch {
+      cookies[key] = val;
+    }
+  }
+  return cookies;
+}
+
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json());
+
+// Signed httpOnly user identification middleware
+app.use((req: Request, res: Response, next) => {
+  const cookies = parseCookies(req.headers.cookie);
+  const cookieVal = cookies[USER_COOKIE_NAME];
+  let userId: string | false = false;
+
+  if (cookieVal) {
+    userId = unsignCookieValue(cookieVal);
+  }
+
+  // Generate new UUID on first visit or if cookie was tampered
+  if (!userId) {
+    userId = crypto.randomUUID();
+    const signed = signCookieValue(userId);
+    res.setHeader(
+      'Set-Cookie',
+      `${USER_COOKIE_NAME}=${encodeURIComponent(signed)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=31536000`
+    );
+  }
+
+  req.userId = userId;
+  next();
+});
 
 // Ensure React client bundle is compiled
 const bundlePath = path.resolve(process.cwd(), 'public/bundle.js');
@@ -49,8 +137,8 @@ if (isDatabaseEmpty()) {
 // Health & Diagnostics
 // ----------------------------------------------------
 
-app.get('/health', (_req: Request, res: Response) => {
-  const stats = getDatabaseStats();
+app.get('/health', (req: Request, res: Response) => {
+  const stats = getDatabaseStats(req.userId);
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
@@ -59,6 +147,9 @@ app.get('/health', (_req: Request, res: Response) => {
     configuredKeys: {
       gemini: Boolean(process.env.GEMINI_API_KEY),
       tavily: Boolean(process.env.TAVILY_API_KEY)
+    },
+    user: {
+      userId: req.userId
     },
     database: {
       status: 'connected',
@@ -86,6 +177,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
   // Accept and store IANA timezone from client
   const clientTimezone = typeof req.body?.timezone === 'string' ? req.body.timezone : undefined;
   if (clientTimezone) {
+    setUserTimezone(req.userId, clientTimezone);
     setUserTimezone(sessionId, clientTimezone);
   }
 
@@ -120,7 +212,8 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     await runAgent(message.trim(), sessionId, sendEvent, new Date(), {
       forceSequentialSearch,
       thinkingBudget,
-      timezone: clientTimezone
+      timezone: clientTimezone,
+      userId: req.userId
     });
   } catch (error: any) {
     console.error('[SSE Server Error]:', error);
@@ -144,9 +237,9 @@ app.get('/api/history', (req: Request, res: Response) => {
   try {
     let messages: Message[];
     if (sessionId) {
-      messages = getRecentMessages(sessionId, 200);
+      messages = getRecentMessages(sessionId, 200, req.userId);
     } else {
-      messages = getAllMessages(500);
+      messages = getAllMessages(500, req.userId);
     }
 
     // Group messages by date_str (YYYY-MM-DD)
@@ -162,6 +255,7 @@ app.get('/api/history', (req: Request, res: Response) => {
     }
 
     return res.json({
+      userId: req.userId,
       totalMessages: messages.length,
       sessions: Array.from(sessionsSet),
       groupedByDate,
@@ -176,13 +270,14 @@ app.get('/api/history', (req: Request, res: Response) => {
 // POST /api/reset (Clear Database Memory to Empty State)
 // ----------------------------------------------------
 
-app.post('/api/reset', (_req: Request, res: Response) => {
+app.post('/api/reset', (req: Request, res: Response) => {
   try {
-    clearDatabase();
-    const stats = getDatabaseStats();
+    clearDatabase(req.userId);
+    const stats = getDatabaseStats(req.userId);
     return res.json({
       success: true,
-      message: 'Database memory successfully cleared to empty state.',
+      userId: req.userId,
+      message: 'User database memory successfully cleared to empty state.',
       stats
     });
   } catch (error: any) {
@@ -219,22 +314,22 @@ app.get('/api/messages', (req: Request, res: Response) => {
 
   try {
     if (startDate && endDate) {
-      const messages = searchMessagesByDateRange(sessionId, startDate, endDate);
-      return res.json({ queryType: 'date_range', count: messages.length, messages });
+      const messages = searchMessagesByDateRange(sessionId, startDate, endDate, req.userId);
+      return res.json({ userId: req.userId, queryType: 'date_range', count: messages.length, messages });
     }
 
     if (keyword) {
-      const messages = searchMessagesFTS(keyword, { sessionId, limit });
-      return res.json({ queryType: 'fts_bm25', count: messages.length, messages });
+      const messages = searchMessagesFTS(keyword, { sessionId, limit, userId: req.userId });
+      return res.json({ userId: req.userId, queryType: 'fts_bm25', count: messages.length, messages });
     }
 
     if (sessionId) {
-      const messages = getRecentMessages(sessionId, limit);
-      return res.json({ queryType: 'recent_session', count: messages.length, messages });
+      const messages = getRecentMessages(sessionId, limit, req.userId);
+      return res.json({ userId: req.userId, queryType: 'recent_session', count: messages.length, messages });
     }
 
-    const messages = getAllMessages(limit);
-    return res.json({ queryType: 'all', count: messages.length, messages });
+    const messages = getAllMessages(limit, req.userId);
+    return res.json({ userId: req.userId, queryType: 'all', count: messages.length, messages });
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }
@@ -261,7 +356,10 @@ app.post('/api/messages', (req: Request, res: Response) => {
       role as MessageRole,
       content,
       createdAt,
-      keywords
+      keywords,
+      false,
+      undefined,
+      req.userId
     );
     return res.status(201).json({ success: true, message: msg });
   } catch (error: any) {
@@ -269,9 +367,14 @@ app.post('/api/messages', (req: Request, res: Response) => {
   }
 });
 
-export const server = app.listen(PORT, () => {
-  console.log(`[Server] Chat Agent server running on http://localhost:${PORT}`);
-});
+export const server = (process.argv[1] && (
+  process.argv[1].replace(/\\/g, '/').endsWith('src/index.ts') ||
+  process.argv[1].replace(/\\/g, '/').endsWith('dist/index.js')
+))
+  ? app.listen(PORT, () => {
+    console.log(`[Server] Chat Agent server running on http://localhost:${PORT}`);
+  })
+  : null;
 
 export default app;
 
