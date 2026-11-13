@@ -9,6 +9,7 @@ A high-performance chat agent in TypeScript on Node.js featuring persistent SQLi
 ### 1. SQLite Persistent Memory & Explicit Demo Seeding (`src/db/`)
 - **Store (`src/db/memory.ts`)**: `better-sqlite3` at `data/chat.db` with WAL mode enabled.
 - **Indexes**: Indexed by `session_id`, `date_str` (`YYYY-MM-DD`), `created_at`, and `is_demo`.
+- **FTS5 Virtual Table (`messages_fts`)**: SQLite FTS5 index over message content kept in sync via insert/delete/update triggers, supporting BM25 relevance ranking.
 - **Empty Startup**: A fresh database starts completely empty on boot. No fabricated conversations are seeded automatically.
 - **Explicit Demo Seeding (`src/db/seed.ts` / `npm run seed:demo`)**: Demo conversations are moved behind an explicit CLI command and clearly tagged in SQLite with `is_demo = 1` (normal live turns use `is_demo = 0`):
   - **"3 November"**: Seeded on `${YYYY}-11-03T14:20:00Z` covering Next.js 15.0.1, Node.js v22.11.0 LTS, and Claude 3.5 Sonnet token pricing.
@@ -17,8 +18,8 @@ A high-performance chat agent in TypeScript on Node.js featuring persistent SQLi
 
 ### 2. Pre-Retrieval Temporal Context Assembler (`src/context/temporalResolver.ts`)
 - **Strictly ONE LLM Tool Rule**: Memory retrieval executes in a deterministic pre-retrieval pipeline **before** the LLM loop.
-- Parses explicit dates ("3 November", "YYYY-MM-DD"), relative days ("Monday", "last Tuesday", "yesterday"), and domain entities ("CRM", "Postgres", "shortlisted").
-- Retrieves matching turns across historical sessions and formats them into a structured context block (`retrievedPastContext`) with exact timestamps and roles for system prompt injection.
+- **FTS5 BM25 + Date-Range Retrieval**: Combines date-range filtering with SQLite FTS5 BM25 relevance ranking over sanitized user terms — completely replacing static keyword lists and linear `LIKE '%keyword%'` scans.
+- **Context Budget Capping**: Injected context is prioritized by date relevance and BM25 score, capped to a strict character budget (`MAX_CONTEXT_CHARS`), and formatted with explicit timestamps (`YYYY-MM-DD HH:mm:ss UTC`) for system prompt injection.
 
 ### 3. Batched Parallel Web Search Tool (`src/tools/webSearch.ts`)
 - Strictly ONE LLM tool: `web_search`.
@@ -27,7 +28,7 @@ A high-performance chat agent in TypeScript on Node.js featuring persistent SQLi
 
 ### 4. Agent Loop & SSE Streaming API (`src/agent/runner.ts`, `src/index.ts`)
 - **Agent Loop (`src/agent/runner.ts`)**:
-  - Uses `@google/genai` (default: `gemini-3.5-flash-lite`, configurable via `MODEL_NAME`).
+  - Uses `@google/genai` (default: `gemini-3.1-flash-lite`, configurable via `MODEL_NAME`).
   - Automatically persists user and assistant messages in SQLite.
   - Generates a 14-day relative calendar mapping in the system prompt so the LLM anchors dates accurately.
   - **Strict Anti-Fabrication Rule**: If the user refers to a past conversation, question, or shortlist and no matching history was retrieved from SQLite, the agent explicitly states that it has no record of it and asks for details. The agent is strictly prohibited from inventing prior conversation turns.
@@ -55,7 +56,7 @@ npm install
 ### 2. Configure Environment (`.env`)
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
-MODEL_NAME=gemini-3.5-flash-lite
+MODEL_NAME=gemini-3.1-flash-lite
 TAVILY_API_KEY=your_tavily_api_key_here
 PORT=3000
 ```

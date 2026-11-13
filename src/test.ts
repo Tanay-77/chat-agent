@@ -4,22 +4,29 @@ import {
   insertMessage,
   getRecentMessages,
   searchMessagesByDateRange,
-  searchMessagesByKeyword,
+  searchMessagesFTS,
+  sanitizeFTSQuery,
   getDatabaseStats,
   getAllMessages,
   clearDatabase,
   isDatabaseEmpty
 } from './db/memory.js';
-import { resolveTemporalContext } from './context/temporalResolver.js';
-import { webSearchToolDeclaration, executeWebSearch } from './tools/webSearch.js';
+import { resolveTemporalContext, MAX_CONTEXT_CHARS } from './context/temporalResolver.js';
+import {
+  webSearchToolDeclaration,
+  executeWebSearch,
+  computeEffectiveStartDate,
+  TAVILY_PUBLISH_DATE_NOTE
+} from './tools/webSearch.js';
 import { buildCalendarReference, buildSystemPrompt, runAgent, AgentEvent } from './agent/runner.js';
 
 async function runTests() {
   console.log('=== Running Chat Agent Verification Suite ===\n');
+  const now = new Date('2026-11-12T12:00:00Z');
 
   // 1. Seed & Memory Tests (with is_demo validation)
   console.log('[1/6] Testing Persistent Memory, Demo Tagging & Database Clearing...');
-  const seedResult = seedDatabase(true);
+  const seedResult = seedDatabase(true, now);
   if (seedResult.messages.length !== 6) {
     throw new Error(`Expected 6 seeded messages, got ${seedResult.messages.length}`);
   }
@@ -43,20 +50,33 @@ async function runTests() {
   }
   db.prepare('DELETE FROM messages WHERE session_id = ?').run('test-live-session');
 
-  // Range and keyword queries
+  // Range and FTS queries
   const novRange = searchMessagesByDateRange(null, '2026-11-01', '2026-11-05');
   if (novRange.length !== 2) throw new Error('Date range query failed');
 
-  const postgresKw = searchMessagesByKeyword(null, 'Postgres');
-  if (postgresKw.length !== 2) throw new Error('Keyword search failed');
+  // FTS5 BM25 search
+  const postgresFts = searchMessagesFTS('Postgres hosting options');
+  if (postgresFts.length < 2) throw new Error('FTS5 search for Postgres failed');
+  if (typeof postgresFts[0].rank !== 'number' || postgresFts[0].rank >= 0) {
+    throw new Error('FTS5 BM25 ranking should return negative score');
+  }
 
   const recent = getRecentMessages('session-monday-crm', 10);
   if (recent.length !== 2) throw new Error('Recent messages query failed');
 
-  console.log('Memory layer tests & is_demo verification passed.');
+  // Test FTS5 query sanitization
+  const safeQuery = sanitizeFTSQuery('flight booking talk (ANA vs JAL)? *deals* "cheap"!');
+  if (!safeQuery.includes('"flight"') || !safeQuery.includes('"booking"') || safeQuery.includes('*') || safeQuery.includes('?')) {
+    throw new Error(`FTS sanitization failed: got ${safeQuery}`);
+  }
+  if (sanitizeFTSQuery('') !== '' || sanitizeFTSQuery('   ') !== '') {
+    throw new Error('Empty query sanitization should return empty string');
+  }
+
+  console.log('Memory layer tests & FTS5 BM25 verification passed.');
 
   // 2. Temporal Context Resolution Tests
-  console.log('\n[2/6] Testing Temporal Context Assembler...');
+  console.log('\n[2/6] Testing Temporal Context Assembler with FTS5 BM25...');
 
   // Query 1: Monday CRM shortlist
   const q1 = "On Monday we shortlisted 5 CRM tools for a 20-person sales team. Has any of them changed pricing or shipped something big since?";
@@ -79,11 +99,108 @@ async function runTests() {
     throw new Error('Temporal resolution for Last Tuesday query failed');
   }
 
+  // Generic Query 4: Unrelated to CRM or Postgres (e.g. "that flight booking talk")
+  console.log('  -> Testing generic topic retrieval unrelated to CRM/Postgres ("that flight booking talk")...');
+  const flightSession = 'session-flight-test';
+  insertMessage(
+    flightSession,
+    'user',
+    'Can you summarize that flight booking talk to Tokyo for next spring? What were the airline options?',
+    '2026-11-06T11:00:00Z'
+  );
+  insertMessage(
+    flightSession,
+    'assistant',
+    'In our flight booking talk, we compared nonstop flights to Tokyo: ANA was $850 round-trip and JAL was $910 round-trip with checked luggage.',
+    '2026-11-06T11:01:00Z'
+  );
+
+  const resFlight = resolveTemporalContext(
+    'What did we decide in that flight booking talk?',
+    'session-generic-eval',
+    now
+  );
+
+  if (resFlight.matchedMessages.length < 2 || !resFlight.matchedMessages.some(m => m.content.includes('ANA was $850'))) {
+    throw new Error(`Generic FTS5 retrieval failed for flight booking talk. Matches: ${resFlight.matchedMessages.length}`);
+  }
+  // Verify timestamps are included in formatted context
+  if (!resFlight.formattedContext.includes('Timestamp:') || !resFlight.formattedContext.includes('2026-11-06')) {
+    throw new Error('Formatted context missing explicit timestamps');
+  }
+  // Verify character budget is respected
+  if (resFlight.formattedContext.length > MAX_CONTEXT_CHARS) {
+    throw new Error(`Context exceeded maximum character budget: ${resFlight.formattedContext.length} > ${MAX_CONTEXT_CHARS}`);
+  }
+  console.log('  ✓ Generic FTS5 retrieval passed: "that flight booking talk" correctly matched via BM25 without static keywords.');
+
+  // Test searchWindow computation derived from anchor date
+  console.log('  -> Testing searchWindow computation from anchor dates...');
+  // Case A: "since Monday" -> relative anchor date (2026-11-09)
+  const resMonday = resolveTemporalContext('Has any pricing changed since Monday?', 'session-win-test', now);
+  if (!resMonday.searchWindow || resMonday.searchWindow.startDate !== '2026-11-09') {
+    throw new Error(`searchWindow failed for "since Monday": expected 2026-11-09, got ${resMonday.searchWindow?.startDate}`);
+  }
+
+  // Case B: "3 November" -> explicit anchor date (2026-11-03)
+  const resNov3 = resolveTemporalContext('What did I ask on 3 November? Is your answer still correct today?', 'session-win-test', now);
+  if (!resNov3.searchWindow || resNov3.searchWindow.startDate !== '2026-11-03') {
+    throw new Error(`searchWindow failed for "3 November": expected 2026-11-03, got ${resNov3.searchWindow?.startDate}`);
+  }
+
+  // Case C: "Last Tuesday" -> relative anchor date (2026-11-10)
+  const resTuesday = resolveTemporalContext('Last Tuesday I asked you about Postgres hosting. Has any pricing changed since then?', 'session-win-test', now);
+  if (!resTuesday.searchWindow || resTuesday.searchWindow.startDate !== '2026-11-10') {
+    throw new Error(`searchWindow failed for "Last Tuesday": expected 2026-11-10, got ${resTuesday.searchWindow?.startDate}`);
+  }
+
+  // Case D: Historical conversation retrieval with no explicit date in prompt -> derived from retrieved messages (2026-11-06)
+  if (!resFlight.searchWindow || resFlight.searchWindow.startDate !== '2026-11-06') {
+    throw new Error(`searchWindow failed for flight booking talk: expected 2026-11-06, got ${resFlight.searchWindow?.startDate}`);
+  }
+
+  // Case E: Small talk with no past conversation or dates -> searchWindow should be undefined
+  const resSmallTalk = resolveTemporalContext('Hello! Can you briefly introduce yourself and what you specialize in?', 'session-win-test', now);
+  if (resSmallTalk.searchWindow !== undefined) {
+    throw new Error(`searchWindow failed for small talk: expected undefined, got ${JSON.stringify(resSmallTalk.searchWindow)}`);
+  }
+  console.log('  ✓ searchWindow computation verified across explicit, relative, conversation-derived, and empty contexts.');
+
+  // Test computeEffectiveStartDate (resolver default applied, model cannot widen/move earlier, model may narrow)
+  console.log('  -> Testing computeEffectiveStartDate enforcement and clamping...');
+  // 1. Resolver startDate applied by default when model provides none
+  const defaultApplied = computeEffectiveStartDate(undefined, '2026-11-09');
+  if (defaultApplied !== '2026-11-09') {
+    throw new Error(`Expected resolver startDate 2026-11-09 to apply by default, got ${defaultApplied}`);
+  }
+
+  // 2. Model cannot widen or move earlier than resolver startDate
+  const widenedClamped = computeEffectiveStartDate('2026-11-01', '2026-11-09');
+  if (widenedClamped !== '2026-11-09') {
+    throw new Error(`Expected widened date 2026-11-01 to be clamped to 2026-11-09, got ${widenedClamped}`);
+  }
+
+  // 3. Model narrowing to a later date is accepted
+  const narrowedAccepted = computeEffectiveStartDate('2026-11-11', '2026-11-09');
+  if (narrowedAccepted !== '2026-11-11') {
+    throw new Error(`Expected narrowed date 2026-11-11 to be accepted, got ${narrowedAccepted}`);
+  }
+
+  // 4. Model providing start_date without resolver default
+  const noResolver = computeEffectiveStartDate('2026-10-15', undefined);
+  if (noResolver !== '2026-10-15') {
+    throw new Error(`Expected model date 2026-10-15 to be preserved without resolver, got ${noResolver}`);
+  }
+  console.log('  ✓ computeEffectiveStartDate verified: resolver default applied, widening blocked, narrowing accepted.');
+
+  // Clean up flight test session
+  db.prepare('DELETE FROM messages WHERE session_id = ?').run(flightSession);
+  db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild');");
+
   console.log('Temporal resolver tests passed.');
 
   // 3. Calendar Reference & System Prompt Verification
   console.log('\n[3/6] Testing Calendar Reference & System Prompt Builder...');
-  const now = new Date('2026-11-12T12:00:00Z');
   const calRef = buildCalendarReference(now);
   if (!calRef.includes('TODAY: Thursday, Nov 12, 2026')) {
     throw new Error('Calendar reference does not correctly anchor today');
@@ -99,6 +216,12 @@ async function runTests() {
   if (!prompt.includes('STRICT ANTI-FABRICATION RULE')) {
     throw new Error('System prompt missing strict anti-fabrication rule');
   }
+  if (!prompt.includes('ABSENCE OF RESULTS IS NOT EVIDENCE OF NO CHANGE')) {
+    throw new Error('System prompt missing "absence of results is not evidence of no change" rule');
+  }
+  if (!prompt.includes('Tavily filters by publish date')) {
+    throw new Error('System prompt missing Tavily publish date disclaimer');
+  }
   console.log('Calendar reference & system prompt generation verified.');
 
   // 4. Web Search Tool Schema Tests
@@ -109,7 +232,16 @@ async function runTests() {
   if (!webSearchToolDeclaration.parameters?.properties?.queries) {
     throw new Error('Tool schema missing queries parameter');
   }
-  console.log('Web search tool schema valid.');
+  if ((webSearchToolDeclaration.parameters?.properties as any)?.days_back !== undefined) {
+    throw new Error('Tool schema must NOT expose days_back to the model');
+  }
+  if (!(webSearchToolDeclaration.parameters?.properties as any)?.start_date) {
+    throw new Error('Tool schema missing start_date parameter');
+  }
+  if (TAVILY_PUBLISH_DATE_NOTE !== 'Tavily filters by publish date. Pages edited after publishing may not appear.') {
+    throw new Error('TAVILY_PUBLISH_DATE_NOTE does not match required note text');
+  }
+  console.log('Web search tool schema valid (days_back removed, start_date supported, publish date note verified).');
 
   // 5. Agent Loop & History Verification with Seeded Data
   console.log('\n[5/6] Testing Agent Loop & Grouped History Structure (Seeded DB)...');

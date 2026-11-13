@@ -34,14 +34,17 @@
 │  │  │      ┌──────────────────────────────────────────────────┐           │  │ │
 │  │  │      │  Parse explicit dates:  "3 November" → 2026-11-03│           │  │ │
 │  │  │      │  Parse relative days:   "Monday" → 2026-11-09    │           │  │ │
-│  │  │      │  Parse entity keywords: "CRM", "Postgres"        │           │  │ │
+│  │  │      │  Sanitize query tokens for safe SQLite FTS5 MATCH│           │  │ │
 │  │  │      └──────────────┬───────────────────────────────────┘           │  │ │
 │  │  │                     │                                               │  │ │
 │  │  │                     ▼                                               │  │ │
 │  │  │      ┌──────────────────────────────────────────────────────────┐   │  │ │
-│  │  │      │  SQLite Cross-Session Queries                           │   │  │ │
-│  │  │      │  searchMessagesByDateRange(null, '2026-11-09', ...)     │   │  │ │
-│  │  │      │  searchMessagesByKeyword(null, 'CRM')                   │   │  │ │
+│  │  │      │  SQLite FTS5 BM25 + Date-Range Search                   │   │  │ │
+│  │  │      │  searchMessagesFTS(userMessage, { dateRange })           │   │  │ │
+│  │  │      │  - messages_fts virtual table over message content       │   │  │ │
+│  │  │      │  - Sync triggers: messages_ai, messages_ad, messages_au  │   │  │ │
+│  │  │      │  - Prioritizes date relevance + BM25 ranking             │   │  │ │
+│  │  │      │  - Capped to character budget (MAX_CONTEXT_CHARS)        │   │  │ │
 │  │  │      └──────────────┬───────────────────────────────────────────┘   │  │ │
 │  │  │                     │                                               │  │ │
 │  │  │                     ▼                                               │  │ │
@@ -108,8 +111,15 @@
 │  │  │  ├── content (TEXT)                      │                              │ │
 │  │  │  ├── created_at (ISO 8601, indexed)      │                              │ │
 │  │  │  ├── date_str (YYYY-MM-DD, indexed)      │                              │ │
-│  │  │  ├── keywords (comma-separated entities) │                              │ │
+│  │  │  ├── keywords (deprecated / compat note) │                              │ │
 │  │  │  └── is_demo (INTEGER, default 0, indexed│                              │ │
+│  │  └──────────────────────────────────────────┘                              │ │
+│  │  ┌──────────────────────────────────────────┐                              │ │
+│  │  │  messages_fts (FTS5 Virtual Table)       │                              │ │
+│  │  │  ├── content (BM25 full-text indexing)   │                              │ │
+│  │  │  └── synced via triggers:                │                              │ │
+│  │  │      messages_ai, messages_ad,           │                              │ │
+│  │  │      messages_au                         │                              │ │
 │  │  └──────────────────────────────────────────┘                              │ │
 │  └─────────────────────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────────────────┘
@@ -132,8 +142,8 @@ The naive approach would be to make memory a second tool and hope the LLM calls 
 **Our solution: deterministic pre-retrieval.** Before the LLM sees the prompt at all, Node.js code:
 
 1. Parses temporal references (`"3 November"` → `2026-11-03`, `"Monday"` → `2026-11-09`) using regex and calendar math — zero LLM involvement.
-2. Queries SQLite cross-session with exact date ranges and entity keywords.
-3. Injects the matched historical turns directly into the system prompt as a structured `[RETRIEVED PAST CONVERSATION MEMORY]` block.
+2. Queries SQLite cross-session combining date-range filters with SQLite FTS5 BM25 ranking (`messages_fts`) over sanitized user terms — zero reliance on hardcoded keyword lists.
+3. Injects the matched historical turns directly into the system prompt as a structured `[RETRIEVED PAST CONVERSATION MEMORY]` block, capped to a strict character budget with full timestamps.
 
 The LLM receives its context pre-assembled. It never needs to "decide" to look up memory. It just sees the past conversation alongside today's question and can immediately reason about what to verify via `web_search`.
 
@@ -271,26 +281,21 @@ The frontend accumulates `status`, `tool_start`, `tool_end`, and `error` events 
 
 ## Trade-offs & Production Next Steps
 
-### Current Limitations
+### Current Limitations & Production Evolution
 
-1. **Keyword-based memory search**: The current `searchMessagesByKeyword` uses SQLite `LIKE '%keyword%'` — linear scan, no semantic understanding. "database hosting" won't match a message about "Postgres hosting" unless "Postgres" or "hosting" appears literally.
+1. **Semantic / Embedding Vector Search**: While SQLite FTS5 BM25 handles arbitrary keyword queries generically without curated keyword lists, pure lexical matching does not understand synonyms ("database hosting" vs. "Postgres hosting" unless "hosting" matches). For true semantic recall, embedding vectors (`text-embedding-004`) in `sqlite-vec` or `pgvector` would complement FTS5 in a hybrid RRF (Reciprocal Rank Fusion) pipeline.
 
-2. **Static entity keyword list**: The `CANDIDATE_KEYWORDS` array in `temporalResolver.ts` is manually curated. New topics discussed in future sessions won't be automatically detected unless the keyword list is expanded.
+2. **No JS-rendered page scraping**: Tavily returns snippets, not full page content. If a vendor updates pricing only on a JavaScript-heavy interactive page (no static text), the search results may not capture the change.
 
-3. **No JS-rendered page scraping**: Tavily returns snippets, not full page content. If a vendor updates pricing only on a JavaScript-heavy interactive page (no static text), the search results may not capture the change.
-
-4. **Single-node SQLite**: `better-sqlite3` is synchronous and single-writer. Fine for a single-server challenge, but won't scale to concurrent multi-instance deployments.
+3. **Single-node SQLite**: `better-sqlite3` is synchronous and single-writer. Fine for a single-server deployment, but horizontal scale requires PostgreSQL with connection pooling.
 
 ### Production Enhancements
 
-1. **SQLite FTS5 + Vector Hybrid Memory**:
-   - Add a `messages_fts` virtual table using SQLite FTS5 for full-text search with BM25 ranking.
-   - For semantic recall ("that database conversation"), embed messages with a lightweight model (e.g., `text-embedding-004`) and store vectors in a `message_embeddings` table. At query time, combine FTS5 keyword hits with cosine-similarity vector results in a hybrid ranker.
+1. **Vector Hybrid Memory (sqlite-vec / pgvector)**:
+   - Combine SQLite FTS5 BM25 with dense semantic vector embeddings. At query time, combine FTS5 lexical hits with cosine-similarity vector results in a hybrid ranker.
 
-2. **Automatic Keyword Extraction**:
-   - Replace the static keyword list with lightweight NER/keyphrase extraction (e.g., `compromise` NLP library or a small Gemini call) at message insertion time. Store extracted entities in the `keywords` column automatically.
-
-3. **Adaptive Page Scraping**:
+2. **Adaptive Page Scraping**:
+   - For high-value pricing URLs detected in search results, dispatch a secondary headless fetch (or Tavily `extract` endpoint) to pull the full rendered page content, then pass it as additional context to the LLM for more accurate diff analysis.
    - For high-value pricing URLs detected in search results, dispatch a secondary headless fetch (or Tavily `extract` endpoint) to pull the full rendered page content, then pass it as additional context to the LLM for more accurate diff analysis.
 
 4. **Rate-Limit Backoff & Circuit Breaker**:

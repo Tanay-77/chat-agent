@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, FunctionCallingConfigMode } from '@google/genai';
 import {
   insertMessage,
   getRecentMessages,
@@ -11,7 +11,8 @@ import { resolveTemporalContext } from '../context/temporalResolver.js';
 import {
   webSearchToolDeclaration,
   executeWebSearch,
-  WebSearchArgs
+  WebSearchArgs,
+  TAVILY_PUBLISH_DATE_NOTE
 } from '../tools/webSearch.js';
 
 export type AgentEventType =
@@ -94,16 +95,26 @@ ${pastContext || 'No relevant past cross-session conversation memory detected.'}
      * Diff Analysis: Explicitly detail what changed (price increases/decreases, new tiers, limits) and what remains identical.
      * Be precise with numbers, tiers, and specs.
 
-4. FACTUAL CITATIONS & TONE:
+4. FACTUAL CITATIONS, BREVITY & TONE:
    - Ground every live factual claim with markdown citations: \`[Source Title](url)\`.
-   - If web search confirms no changes have occurred, state explicitly: "Pricing and limits for [Provider] remain unchanged since [Date] based on current official documentation [Source](url)."
-   - Maintain a concise, authoritative, professional, and well-structured response using Markdown tables or bullet points.
+   - Be direct, concise, and structured. Avoid lengthy conversational filler or generic preambles.
+   - For comparisons, prioritize compact Markdown tables and high-density bullet points so the user gets facts immediately.
 
 5. STRICT ANTI-FABRICATION RULE (NO CONVERSATION HALLUCINATION):
    - If the user refers to a past conversation, prior discussion, shortlist, question, or specific date (e.g., "what did I ask on 3 November?", "on Monday we shortlisted...", "last Tuesday I asked you about..."), and the HISTORICAL CONVERSATION MEMORY section above is empty or does NOT contain any matching record of that conversation:
      * You MUST explicitly state that you have no record of that prior conversation or question for that date/topic.
      * Ask the user to share the details or provide context.
-     * You must NEVER invent, assume, simulate, or fabricate prior conversation content, previous questions, or past shortlists.`;
+     * You must NEVER invent, assume, simulate, or fabricate prior conversation content, previous questions, or past shortlists.
+
+6. ABSENCE OF RESULTS IS NOT EVIDENCE OF NO CHANGE:
+   - Absence of results is not evidence of no change.
+   - Tavily filters by publish date. Pages edited after publishing may not appear.
+   - If no updates or changes are returned for a provider, do not assert with certainty that nothing changed. Explicitly say what you searched, the date window evaluated (e.g., "since [YYYY-MM-DD]"), and that no relevant news or published updates were found.`;
+}
+
+export interface RunAgentOptions {
+  forceSequentialSearch?: boolean;
+  thinkingBudget?: number;
 }
 
 /**
@@ -119,7 +130,8 @@ export async function runAgent(
   userMessage: string,
   sessionId: string = 'default-session',
   onEvent: AgentEventCallback = () => { },
-  refDate: Date = new Date()
+  refDate: Date = new Date(),
+  options: RunAgentOptions = {}
 ): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -130,7 +142,7 @@ export async function runAgent(
     return errorMsg;
   }
 
-  const modelName = process.env.MODEL_NAME || 'gemini-3.5-flash-lite';
+  const modelName = process.env.MODEL_NAME || 'gemini-3.1-flash-lite';
   const now = refDate;
   const isoNow = now.toISOString();
 
@@ -167,6 +179,16 @@ export async function runAgent(
   // Initialize Gemini client
   const ai = new GoogleGenAI({ apiKey });
 
+  // Deterministic intent check before the first model call:
+  // If message contains change/current-state wording (still, changed, since, current, latest, now, pricing, new)
+  // or temporal resolver anchored to a past conversation, force first turn to call web_search.
+  const changeCurrentRegex = /\b(still|changed|since|current|latest|now|pricing|new)\b/i;
+  const hasChangeWording = changeCurrentRegex.test(userMessage);
+  const hasAnchoredPastConvo =
+    (temporalRes.hasTemporalReference || temporalRes.detectedDates.length > 0) &&
+    temporalRes.matchedMessages.length > 0;
+  const shouldForceSearchFirstTurn = hasChangeWording || hasAnchoredPastConvo;
+
   let finalAnswer = '';
   const maxIterations = 4;
   let iteration = 0;
@@ -175,18 +197,64 @@ export async function runAgent(
     while (iteration < maxIterations) {
       iteration++;
 
-      // Request stream from Gemini
-      const responseStream = await ai.models.generateContentStream({
-        model: modelName,
-        contents,
-        config: {
-          systemInstruction: systemPrompt,
-          tools: [{
-            functionDeclarations: [webSearchToolDeclaration]
-          }],
-          temperature: 0.2
+      // Configure function calling mode: force ANY on iteration 1 if intent triggers, otherwise AUTO
+      const forceThisTurn = iteration === 1 && shouldForceSearchFirstTurn;
+      const functionCallingConfig = forceThisTurn
+        ? {
+          mode: FunctionCallingConfigMode.ANY,
+          allowedFunctionNames: ['web_search']
         }
-      });
+        : {
+          mode: FunctionCallingConfigMode.AUTO
+        };
+
+      console.log(
+        `[Agent Runner Turn ${iteration}] Function calling path: ${forceThisTurn ? 'FORCED (mode: ANY)' : 'AUTO (mode: AUTO)'} ` +
+        `[reason: ${forceThisTurn ? (hasChangeWording ? 'change/current wording' : 'anchored past memory') : 'default/subsequent turn'}]`
+      );
+
+      const streamConfig: any = {
+        systemInstruction: systemPrompt,
+        tools: [{
+          functionDeclarations: [webSearchToolDeclaration]
+        }],
+        toolConfig: {
+          functionCallingConfig
+        },
+        temperature: 0.2,
+        maxOutputTokens: 1500
+      };
+
+      if (typeof options.thinkingBudget === 'number') {
+        streamConfig.thinkingConfig = {
+          thinkingBudget: options.thinkingBudget
+        };
+      }
+
+      // Request stream from Gemini with transient error backoff (429 rate limit or 503 high demand)
+      let responseStream: any = null;
+      let retriesLeft = 3;
+      while (retriesLeft >= 0) {
+        try {
+          responseStream = await ai.models.generateContentStream({
+            model: modelName,
+            contents,
+            config: streamConfig
+          });
+          break;
+        } catch (apiErr: any) {
+          const isRateLimit = apiErr?.status === 429 || String(apiErr?.message).includes('429');
+          const isHighDemand = apiErr?.status === 503 || String(apiErr?.message).includes('503');
+          if ((isRateLimit || isHighDemand) && retriesLeft > 0) {
+            retriesLeft--;
+            const delaySec = isRateLimit ? 12 : 3;
+            console.warn(`[Agent Runner] Gemini API ${isRateLimit ? '429 Rate Limit' : '503 High Demand'}. Backing off for ${delaySec}s before retry...`);
+            await new Promise((r) => setTimeout(r, delaySec * 1000));
+          } else {
+            throw apiErr;
+          }
+        }
+      }
 
       let iterationText = '';
       const functionCalls: any[] = [];
@@ -234,7 +302,11 @@ export async function runAgent(
             onEvent({ type: 'tool_start', queries });
 
             const startTime = Date.now();
-            const searchResults = await executeWebSearch(rawArgs);
+            const searchResults = await executeWebSearch(
+              rawArgs,
+              Boolean(options.forceSequentialSearch),
+              temporalRes.searchWindow?.startDate
+            );
             const durationMs = Date.now() - startTime;
 
             onEvent({
@@ -246,7 +318,8 @@ export async function runAgent(
             const funcResponseObj: any = {
               name: call.name,
               response: {
-                results: searchResults
+                results: searchResults,
+                note: TAVILY_PUBLISH_DATE_NOTE
               }
             };
             if (call.id) {

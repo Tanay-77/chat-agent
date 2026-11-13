@@ -10,7 +10,7 @@ import {
   getAllMessages,
   getRecentMessages,
   searchMessagesByDateRange,
-  searchMessagesByKeyword,
+  searchMessagesFTS,
   insertMessage,
   clearDatabase,
   MessageRole,
@@ -18,6 +18,7 @@ import {
   db
 } from './db/memory.js';
 import { runAgent, AgentEvent } from './agent/runner.js';
+import { clearSearchCache } from './tools/webSearch.js';
 import { buildClient } from './client/build.js';
 
 const app = express();
@@ -53,7 +54,7 @@ app.get('/health', (_req: Request, res: Response) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
     uptimeSeconds: process.uptime(),
-    model: process.env.MODEL_NAME || 'gemini-3.5-flash-lite',
+    model: process.env.MODEL_NAME || 'gemini-3.1-flash-lite',
     configuredKeys: {
       gemini: Boolean(process.env.GEMINI_API_KEY),
       tavily: Boolean(process.env.TAVILY_API_KEY)
@@ -77,6 +78,14 @@ app.get('/', (_req: Request, res: Response) => {
 
 app.post('/api/chat', async (req: Request, res: Response) => {
   const { message, sessionId = 'default-session' } = req.body;
+  const forceSequentialSearch = Boolean(
+    req.body?.forceSequentialSearch || req.query?.forceSequentialSearch === 'true'
+  );
+
+  const rawThinkingBudget = req.body?.thinkingBudget ?? req.query?.thinkingBudget;
+  const thinkingBudget = typeof rawThinkingBudget === 'number'
+    ? rawThinkingBudget
+    : (typeof rawThinkingBudget === 'string' && !isNaN(parseInt(rawThinkingBudget, 10)) ? parseInt(rawThinkingBudget, 10) : undefined);
 
   if (!message || typeof message !== 'string' || message.trim().length === 0) {
     return res.status(400).json({ error: 'Field "message" is required and cannot be empty.' });
@@ -101,7 +110,10 @@ app.post('/api/chat', async (req: Request, res: Response) => {
   };
 
   try {
-    await runAgent(message.trim(), sessionId, sendEvent);
+    await runAgent(message.trim(), sessionId, sendEvent, new Date(), {
+      forceSequentialSearch,
+      thinkingBudget
+    });
   } catch (error: any) {
     console.error('[SSE Server Error]:', error);
     sendEvent({ type: 'error', error: error?.message || 'Unexpected server error' });
@@ -171,6 +183,22 @@ app.post('/api/reset', (_req: Request, res: Response) => {
 });
 
 // ----------------------------------------------------
+// POST /api/cache/clear (Clear In-Memory Search Cache)
+// ----------------------------------------------------
+
+app.post('/api/cache/clear', (_req: Request, res: Response) => {
+  try {
+    clearSearchCache();
+    return res.json({
+      success: true,
+      message: 'Search cache cleared successfully.'
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// ----------------------------------------------------
 // Memory Query & Insert APIs
 // ----------------------------------------------------
 
@@ -188,8 +216,8 @@ app.get('/api/messages', (req: Request, res: Response) => {
     }
 
     if (keyword) {
-      const messages = searchMessagesByKeyword(sessionId, keyword);
-      return res.json({ queryType: 'keyword', count: messages.length, messages });
+      const messages = searchMessagesFTS(keyword, { sessionId, limit });
+      return res.json({ queryType: 'fts_bm25', count: messages.length, messages });
     }
 
     if (sessionId) {

@@ -1,17 +1,26 @@
 import {
   searchMessagesByDateRange,
-  searchMessagesByKeyword,
+  searchMessagesFTS,
+  sanitizeFTSQuery,
   getRecentMessages,
   Message
 } from '../db/memory.js';
 
+export interface SearchWindow {
+  startDate?: string; // YYYY-MM-DD
+}
+
 export interface RetrievedContextResult {
   hasTemporalReference: boolean;
   detectedDates: string[]; // YYYY-MM-DD
-  detectedKeywords: string[];
+  detectedKeywords: string[]; // Deprecated: replaced by FTS5 query terms
   matchedMessages: Message[];
   formattedContext: string;
+  searchWindow?: SearchWindow;
 }
+
+// Character budget for injected historical context (~1,000 tokens)
+export const MAX_CONTEXT_CHARS = 4000;
 
 const MONTH_MAP: Record<string, number> = {
   jan: 0, january: 0,
@@ -37,35 +46,6 @@ const DAY_OF_WEEK_MAP: Record<string, number> = {
   friday: 5, fri: 5,
   saturday: 6, sat: 6
 };
-
-// Known domain entity keywords for past conversation retrieval
-const CANDIDATE_KEYWORDS = [
-  'crm',
-  'postgres',
-  'postgresql',
-  'supabase',
-  'neon',
-  'aws rds',
-  'rds',
-  'render',
-  'railway',
-  'hubspot',
-  'pipedrive',
-  'attio',
-  'close',
-  'folk',
-  'next.js',
-  'nextjs',
-  'node.js',
-  'nodejs',
-  'lts',
-  'claude',
-  'sonnet',
-  'pricing',
-  'shortlist',
-  'shortlisted',
-  'hosting'
-];
 
 /**
  * Formats a Date object to YYYY-MM-DD string.
@@ -178,83 +158,126 @@ function extractRelativeDates(text: string, now: Date): { dates: string[]; isWee
 }
 
 /**
- * Extracts domain-relevant keywords from the query.
- */
-function extractDomainKeywords(text: string): string[] {
-  const lower = text.toLowerCase();
-  const found: string[] = [];
-
-  for (const kw of CANDIDATE_KEYWORDS) {
-    const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(`\\b${escaped}\\b`, 'i');
-    if (regex.test(lower)) {
-      found.push(kw);
-    }
-  }
-
-  return found;
-}
-
-/**
  * Resolves temporal context and retrieves matching historical messages from SQLite.
- * Cross-session retrieval is automatically enabled when temporal or domain references are detected.
+ * Uses date-range filtering combined with SQLite FTS5 BM25 ranking over message content.
+ * Caps the injected context to a character budget, prioritizing highest-ranked and most date-relevant turns.
  */
 export function resolveTemporalContext(
   userMessage: string,
   sessionId: string,
-  now: Date = new Date()
+  now: Date = new Date(),
+  maxChars: number = MAX_CONTEXT_CHARS
 ): RetrievedContextResult {
   const explicitDates = extractExplicitDates(userMessage, now);
   const { dates: relativeDates } = extractRelativeDates(userMessage, now);
 
   const allDetectedDates = Array.from(new Set([...explicitDates, ...relativeDates]));
-  const detectedKeywords = extractDomainKeywords(userMessage);
-
   const hasTemporalReference = allDetectedDates.length > 0 ||
     /\b(last|previous|yesterday|ago|since|earlier|before|shortlisted|asked you)\b/i.test(userMessage);
 
   const messageMap = new Map<number, Message>();
 
-  // 1. Retrieve by detected dates (cross-session search)
+  // 1. Date-range filtered retrieval (when dates are detected)
   for (const dateStr of allDetectedDates) {
-    const dateMessages = searchMessagesByDateRange(null, dateStr, dateStr);
-    for (const msg of dateMessages) {
+    // 1a. Date-filtered FTS search with BM25 ranking
+    const dateFtsMessages = searchMessagesFTS(userMessage, {
+      startDateStr: dateStr,
+      endDateStr: dateStr,
+      limit: 10
+    });
+    for (const msg of dateFtsMessages) {
       messageMap.set(msg.id, msg);
+    }
+
+    // 1b. All messages for detected date (guarantees retrieval even for non-keyword questions like "What did I ask on 3 November?")
+    const dateAllMessages = searchMessagesByDateRange(null, dateStr, dateStr);
+    for (const msg of dateAllMessages) {
+      if (!messageMap.has(msg.id)) {
+        messageMap.set(msg.id, { ...msg, rank: 0 });
+      }
     }
   }
 
-  // 2. Retrieve by detected keywords (cross-session search)
-  for (const kw of detectedKeywords) {
-    const kwMessages = searchMessagesByKeyword(null, kw);
-    for (const msg of kwMessages) {
+  // 2. Cross-session FTS search across all dates (handles arbitrary topics e.g. "that flight booking talk")
+  const ftsMessages = searchMessagesFTS(userMessage, { limit: 20 });
+  for (const msg of ftsMessages) {
+    const existing = messageMap.get(msg.id);
+    if (!existing) {
       messageMap.set(msg.id, msg);
+    } else if (typeof msg.rank === 'number' && (typeof existing.rank !== 'number' || msg.rank < existing.rank)) {
+      messageMap.set(msg.id, { ...existing, rank: msg.rank });
     }
   }
 
-  // 3. If "what did i ask you" or conversational recall phrasing without specific match, pull recent across sessions
-  if (messageMap.size === 0 && /\b(asked you|we shortlisted|we discussed|shortlisted)\b/i.test(userMessage)) {
+  // 3. Fallback: conversational recall phrasing when no specific date or FTS hits matched
+  if (messageMap.size === 0 && /\b(asked you|we shortlisted|we discussed|shortlisted|remember)\b/i.test(userMessage)) {
     const recent = getRecentMessages(null, 6);
     for (const msg of recent) {
-      messageMap.set(msg.id, msg);
+      messageMap.set(msg.id, { ...msg, rank: 0 });
     }
   }
 
-  // Sort matched messages chronologically
-  const matchedMessages = Array.from(messageMap.values()).sort((a, b) => {
+  const allCandidates = Array.from(messageMap.values());
+
+  // Rank and prioritize:
+  // Preference 1: Matches resolved date AND has FTS match (bm25Score < 0)
+  // Preference 2: Matches resolved date
+  // Preference 3: Has FTS BM25 match (bm25Score < 0)
+  // Preference 4: Others
+  allCandidates.sort((a, b) => {
+    const aDateMatch = allDetectedDates.includes(a.date_str);
+    const bDateMatch = allDetectedDates.includes(b.date_str);
+    const aRank = typeof a.rank === 'number' ? a.rank : 0;
+    const bRank = typeof b.rank === 'number' ? b.rank : 0;
+
+    // Both date match + FTS match
+    const aBoth = aDateMatch && aRank < 0;
+    const bBoth = bDateMatch && bRank < 0;
+    if (aBoth && !bBoth) return -1;
+    if (!aBoth && bBoth) return 1;
+    if (aBoth && bBoth) return aRank - bRank;
+
+    // Date match priority
+    if (aDateMatch && !bDateMatch) return -1;
+    if (!aDateMatch && bDateMatch) return 1;
+
+    // FTS BM25 priority (lower/more negative is better)
+    if (aRank < 0 && bRank < 0) return aRank - bRank;
+    if (aRank < 0 && bRank >= 0) return -1;
+    if (aRank >= 0 && bRank < 0) return 1;
+
+    // Recency fallback
+    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+  });
+
+  // Cap injected context to character/token budget
+  let currentChars = 0;
+  const selectedMessages: Message[] = [];
+
+  for (const candidate of allCandidates) {
+    const candidateLen = candidate.content.length + 150; // estimate overhead with headers
+    if (selectedMessages.length > 0 && currentChars + candidateLen > maxChars) {
+      continue;
+    }
+    selectedMessages.push(candidate);
+    currentChars += candidateLen;
+  }
+
+  // Sort selected turns chronologically for coherent conversation flow
+  selectedMessages.sort((a, b) => {
     return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
   });
 
-  // Format into a structured context block
+  // Format into a structured context block with timestamps
   let formattedContext = '';
-  if (matchedMessages.length > 0) {
+  if (selectedMessages.length > 0) {
     const lines: string[] = [
       '### [RETRIEVED PAST CONVERSATION MEMORY (CROSS-SESSION)] ###',
       'The following turns are retrieved from historical memory relevant to the user query:'
     ];
 
-    for (const msg of matchedMessages) {
-      // Format timestamp YYYY-MM-DD HH:mm
-      const timeStr = msg.created_at.slice(0, 16).replace('T', ' ');
+    for (const msg of selectedMessages) {
+      const timeStr = msg.created_at.slice(0, 19).replace('T', ' ');
       lines.push(
         `\n[Session: ${msg.session_id} | Timestamp: ${timeStr} UTC | Date: ${msg.date_str} | Role: ${msg.role}]`
       );
@@ -265,12 +288,25 @@ export function resolveTemporalContext(
     formattedContext = lines.join('\n');
   }
 
+  // Derive searchWindow from anchor date of retrieved past conversation or detected date
+  let anchorDate: string | undefined;
+  if (selectedMessages.length > 0) {
+    // If a detected date matches a retrieved message, that is the primary anchor
+    const matchedDetected = allDetectedDates.find(d => selectedMessages.some(m => m.date_str === d));
+    anchorDate = matchedDetected || selectedMessages[0].date_str;
+  } else if (allDetectedDates.length > 0) {
+    anchorDate = allDetectedDates[0];
+  }
+
+  const searchWindow: SearchWindow | undefined = anchorDate ? { startDate: anchorDate } : undefined;
+
   return {
     hasTemporalReference,
     detectedDates: allDetectedDates,
-    detectedKeywords,
-    matchedMessages,
-    formattedContext
+    detectedKeywords: [],
+    matchedMessages: selectedMessages,
+    formattedContext,
+    searchWindow
   };
 }
 

@@ -1,9 +1,13 @@
 import { Type, FunctionDeclaration } from '@google/genai';
 
+export const TAVILY_PUBLISH_DATE_NOTE =
+  'Tavily filters by publish date. Pages edited after publishing may not appear.';
+
 export interface WebSearchArgs {
   queries: string[];
   topic?: 'general' | 'news';
-  days_back?: number;
+  start_date?: string;
+  end_date?: string;
 }
 
 export interface WebSearchResultItem {
@@ -12,16 +16,72 @@ export interface WebSearchResultItem {
   url: string;
   published_date?: string;
   snippet: string;
+  note?: string;
 }
 
 export interface WebSearchResponse {
   results: WebSearchResultItem[];
+  note?: string;
   error?: string;
+}
+
+/**
+ * Computes the effective start date:
+ * - If resolver provides a default startDate, apply it by default.
+ * - If the model specifies a start_date, the model may not widen or move it to an earlier date.
+ *   (i.e. model start_date earlier than resolver startDate is clamped to resolver startDate).
+ * - If model narrows to a later date, the later date is accepted.
+ */
+export function computeEffectiveStartDate(
+  modelStartDate?: string,
+  resolverStartDate?: string
+): string | undefined {
+  if (resolverStartDate) {
+    if (modelStartDate) {
+      // Model cannot widen or move earlier than resolverStartDate
+      if (modelStartDate < resolverStartDate) {
+        return resolverStartDate;
+      }
+      return modelStartDate;
+    }
+    return resolverStartDate;
+  }
+  return modelStartDate;
 }
 
 const TAVILY_ENDPOINT = 'https://api.tavily.com/search';
 const REQUEST_TIMEOUT_MS = 8000;
 const MAX_CONCURRENT_QUERIES = 6;
+const SEARCH_CACHE_TTL_MS = 60 * 60 * 1000; // 1-hour cache TTL
+
+interface CacheEntry {
+  timestamp: number;
+  results: WebSearchResultItem[];
+}
+
+const searchCache = new Map<string, CacheEntry>();
+
+function getCachedSearch(key: string): WebSearchResultItem[] | null {
+  const entry = searchCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > SEARCH_CACHE_TTL_MS) {
+    searchCache.delete(key);
+    return null;
+  }
+  return entry.results;
+}
+
+function setCachedSearch(key: string, results: WebSearchResultItem[]): void {
+  if (searchCache.size > 500) {
+    const oldestKey = searchCache.keys().next().value;
+    if (oldestKey) searchCache.delete(oldestKey);
+  }
+  searchCache.set(key, { timestamp: Date.now(), results });
+}
+
+export function clearSearchCache(): void {
+  searchCache.clear();
+}
 
 /**
  * Executes a single search query against the Tavily API with timeout and retry.
@@ -30,20 +90,33 @@ async function fetchTavilySearch(
   query: string,
   apiKey: string,
   topic: 'general' | 'news' = 'general',
-  daysBack?: number,
+  startDate?: string,
+  endDate?: string,
   retries: number = 1
 ): Promise<WebSearchResultItem[]> {
+  const normalizedQuery = query.trim().toLowerCase();
+  const cacheKey = `${topic}:${startDate || ''}:${endDate || ''}:${normalizedQuery}`;
+
+  // Return cached result if available
+  const cached = getCachedSearch(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const payload: Record<string, any> = {
     api_key: apiKey,
     query: query.trim(),
-    search_depth: 'advanced',
+    search_depth: 'basic', // 'basic' depth cuts network latency from ~5s down to ~1.2-1.8s
     include_answer: false,
     max_results: 5,
     topic
   };
 
-  if (typeof daysBack === 'number' && daysBack > 0) {
-    payload.days = Math.min(Math.max(1, Math.round(daysBack)), 365);
+  if (startDate) {
+    payload.start_date = startDate;
+  }
+  if (endDate) {
+    payload.end_date = endDate;
   }
 
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -75,13 +148,20 @@ async function fetchTavilySearch(
       const data = await response.json();
       const rawResults = Array.isArray(data.results) ? data.results : [];
 
-      return rawResults.map((item: any) => ({
+      const formatted = rawResults.map((item: any) => ({
         query,
         title: (item.title || '').trim(),
         url: (item.url || '').trim(),
         published_date: item.published_date || undefined,
-        snippet: (item.content || '').replace(/\s+/g, ' ').trim()
+        snippet: (item.content || '').replace(/\s+/g, ' ').trim(),
+        note: TAVILY_PUBLISH_DATE_NOTE
       }));
+
+      if (formatted.length > 0) {
+        setCachedSearch(cacheKey, formatted);
+      }
+
+      return formatted;
     } catch (err: any) {
       clearTimeout(timeoutId);
       const isAbort = err.name === 'AbortError';
@@ -100,9 +180,15 @@ async function fetchTavilySearch(
 
 /**
  * Batched Parallel Web Search Tool
- * Executes up to 6 queries in parallel, deduplicates results by URL, and formats cleanly.
+ * Executes up to 6 queries in parallel (or sequentially if forceSequential is true),
+ * applies default startDate from temporal resolver (model cannot widen/move it earlier),
+ * deduplicates results by URL, and formats cleanly with the Tavily publish date disclaimer note.
  */
-export async function executeWebSearch(args: WebSearchArgs): Promise<WebSearchResultItem[]> {
+export async function executeWebSearch(
+  args: WebSearchArgs,
+  forceSequential: boolean = false,
+  resolverStartDate?: string
+): Promise<WebSearchResultItem[]> {
   const apiKey = process.env.TAVILY_API_KEY;
   if (!apiKey) {
     console.warn('[WebSearch Tool] TAVILY_API_KEY is not configured in environment.');
@@ -120,14 +206,24 @@ export async function executeWebSearch(args: WebSearchArgs): Promise<WebSearchRe
   }
 
   const topic = args.topic === 'news' ? 'news' : 'general';
-  const daysBack = typeof args.days_back === 'number' ? args.days_back : undefined;
+  const effectiveStartDate = computeEffectiveStartDate(args.start_date, resolverStartDate);
+  const effectiveEndDate = args.end_date;
 
-  // Execute all queries in parallel
-  const searchPromises = queries.map((q) =>
-    fetchTavilySearch(q, apiKey, topic, daysBack, 1)
-  );
+  let nestedResults: WebSearchResultItem[][] = [];
 
-  const nestedResults = await Promise.all(searchPromises);
+  if (forceSequential) {
+    // Force sequential execution for benchmarking comparison
+    for (const q of queries) {
+      const res = await fetchTavilySearch(q, apiKey, topic, effectiveStartDate, effectiveEndDate, 1);
+      nestedResults.push(res);
+    }
+  } else {
+    // Execute all queries in parallel via Promise.all
+    const searchPromises = queries.map((q) =>
+      fetchTavilySearch(q, apiKey, topic, effectiveStartDate, effectiveEndDate, 1)
+    );
+    nestedResults = await Promise.all(searchPromises);
+  }
 
   // Flatten and deduplicate by URL
   const seenUrls = new Set<string>();
@@ -139,10 +235,12 @@ export async function executeWebSearch(args: WebSearchArgs): Promise<WebSearchRe
         continue;
       }
       seenUrls.add(item.url);
+      item.note = TAVILY_PUBLISH_DATE_NOTE;
       deduplicated.push(item);
     }
   }
 
+  (deduplicated as any).note = TAVILY_PUBLISH_DATE_NOTE;
   return deduplicated;
 }
 
@@ -167,9 +265,13 @@ export const webSearchToolDeclaration: FunctionDeclaration = {
         enum: ['general', 'news'],
         description: 'Optional category of search. Use "news" for recent product announcements or "general" for documentation and pricing.'
       },
-      days_back: {
-        type: Type.INTEGER,
-        description: 'Optional time filter in days (e.g., 3, 7, 30) to restrict results to recent updates.'
+      start_date: {
+        type: Type.STRING,
+        description: 'Optional start date in YYYY-MM-DD format to filter results published on or after this date.'
+      },
+      end_date: {
+        type: Type.STRING,
+        description: 'Optional end date in YYYY-MM-DD format to filter results published on or before this date.'
       }
     },
     required: ['queries']
