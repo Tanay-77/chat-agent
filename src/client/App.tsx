@@ -13,6 +13,9 @@ export const App: React.FC = () => {
   const [inspectDate, setInspectDate] = useState<string | null>(null);
   const [inspectMessages, setInspectMessages] = useState<HistoricalMessage[]>([]);
   const [sessionId] = useState('eval-session-live');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+
+  const toggleSidebar = () => setIsSidebarOpen((prev) => !prev);
 
   const fetchTimeline = async () => {
     try {
@@ -190,6 +193,8 @@ export const App: React.FC = () => {
   return (
     <div className="app-shell">
       <Sidebar
+        isOpen={isSidebarOpen}
+        onToggleSidebar={toggleSidebar}
         timeline={timeline}
         onSelectDate={(date, msgs) => {
           setInspectDate(date);
@@ -208,6 +213,8 @@ export const App: React.FC = () => {
         isLoading={isLoading}
         statusText={statusText}
         sessionId={sessionId}
+        isSidebarOpen={isSidebarOpen}
+        onToggleSidebar={toggleSidebar}
       />
 
       <InspectorModal

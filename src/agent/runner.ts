@@ -17,6 +17,7 @@ import {
   webSearchToolDeclaration,
   executeWebSearch,
   WebSearchArgs,
+  WebSearchResultItem,
   TAVILY_PUBLISH_DATE_NOTE
 } from '../tools/webSearch.js';
 
@@ -97,6 +98,9 @@ ${calendarRef}
 === HISTORICAL CONVERSATION MEMORY ===
 ${pastContext || 'No relevant past cross-session conversation memory detected.'}
 
+IMPORTANT NOTE ON RETRIEVED MEMORY:
+Retrieved past conversation is what the USER said or what the assistant claimed earlier. It is NOT a source of current facts. Never state a version, price, date or status from past conversation or from model memory. Current facts must come from this turn's search results only.
+
 === OPERATIONAL INSTRUCTIONS & RULES ===
 1. TEMPORAL ACCURACY & RESOLUTION:
    - Anchor all temporal queries strictly to the CALENDAR REFERENCE table above.
@@ -107,19 +111,23 @@ ${pastContext || 'No relevant past cross-session conversation memory detected.'}
    - When asked to verify if any pricing, release version, or feature has changed since a past date, decompose your verification into 1 to 6 targeted, concurrent queries inside a SINGLE \`web_search\` call.
    - Include specific vendor/product names, the current year/month, and keywords like "pricing", "plans", "release notes", or "changelog" (e.g., ["HubSpot Sales Hub pricing 2026", "Pipedrive pricing changes", "Attio CRM pricing", "Close CRM plans", "Folk CRM pricing"]).
 
-3. TEMPORAL DIFF & COMPARISON:
+3. GROUNDING & ANTI-CONTAMINATION (CRITICAL):
+   - Retrieved past conversation is what the USER said or what the assistant claimed earlier. It is NOT a source of current facts. Never state a version, price, date or status from past conversation or from model memory. Current facts must come from this turn's search results only.
+   - Every version number, price, date, or status in the answer must appear in the search results provided. If results don't contain it or conflict, say so and give what the results do say. Never write a release date that isn't in the results.
+
+4. TEMPORAL DIFF & COMPARISON:
    - When checking changes since Date X, perform an explicit TEMPORAL DIFF:
      * Baseline: What was stated or shortlisted in the historical conversation on that date.
      * Current Live Reality: What live web results show as of today (${formatDateInTz(now, tz)}).
      * Diff Analysis: Explicitly detail what changed (price increases/decreases, new tiers, limits) and what remains identical.
      * Be precise with numbers, tiers, and specs.
 
-4. FACTUAL CITATIONS, BREVITY & TONE:
-   - Ground every live factual claim with markdown citations: \`[Source Title](url)\`.
+5. ANSWER FORMAT & CITATIONS:
+   - Cite sources inline, with a link to the specific page for each key claim (not just a homepage), e.g., \`[Source Title](url)\`.
    - Be direct, concise, and structured. Avoid lengthy conversational filler or generic preambles.
    - For comparisons, prioritize compact Markdown tables and high-density bullet points so the user gets facts immediately.
 
-5. STRICT ANTI-FABRICATION RULE & AMBIGUOUS DATE RESOLUTION:
+6. STRICT ANTI-FABRICATION RULE & AMBIGUOUS DATE RESOLUTION:
    - If the user refers to a past conversation, prior discussion, shortlist, question, or specific date (e.g., "what did I ask on 3 November?", "on Monday we shortlisted...", "last Tuesday I asked you about..."), and the HISTORICAL CONVERSATION MEMORY section above is empty or does NOT contain any matching record of that conversation:
      * You MUST explicitly state that you have no record of that prior conversation or question for that date/topic.
      * Ask the user to share the details or provide context.
@@ -128,7 +136,7 @@ ${pastContext || 'No relevant past cross-session conversation memory detected.'}
      * Explicitly state the ambiguity and identify which interpretation you used (e.g. "Interpreted '11/3' as day/month for your timezone").
      * If no records exist for that date under that interpretation, explicitly state that you have no record for that date rather than guessing.
 
-6. ABSENCE OF RESULTS IS NOT EVIDENCE OF NO CHANGE:
+7. ABSENCE OF RESULTS IS NOT EVIDENCE OF NO CHANGE:
    - Absence of results is not evidence of no change.
    - Tavily filters by publish date. Pages edited after publishing may not appear.
    - If no updates or changes are returned for a provider, do not assert with certainty that nothing changed. Explicitly say what you searched, the date window evaluated (e.g., "since [YYYY-MM-DD]"), and that no relevant news or published updates were found.`;
@@ -139,16 +147,16 @@ export interface RunAgentOptions {
   thinkingBudget?: number;
   timezone?: string;
   userId?: string;
+  mockSearchResults?: WebSearchResultItem[];
 }
 
 /**
  * Runs the agent loop:
- * 1. Saves user message to SQLite.
- * 2. Pre-retrieves temporal cross-session context.
- * 3. Builds system prompt and fetches active session history.
- * 4. Executes multi-turn tool calling loop (max 4 iterations).
- * 5. Streams tokens and progress events via onEvent callback.
- * 6. Saves assistant response to SQLite.
+ * 1. Emits immediate SSE status event.
+ * 2. Saves user message and runs pre-retrieval pipeline.
+ * 3. Enforces search policy (Turn 1 search -> optional 1 retry if 0/stale -> Turn 2 synthesis with mode: NONE).
+ * 4. Logs per-call metrics and final stage breakdown.
+ * 5. Streams synthesis tokens and saves assistant response.
  */
 export async function runAgent(
   userMessage: string,
@@ -157,6 +165,8 @@ export async function runAgent(
   refDate: Date = new Date(),
   options: RunAgentOptions = {}
 ): Promise<string> {
+  const requestStartTime = performance.now();
+
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     const errorMsg = 'GEMINI_API_KEY is not configured in environment.';
@@ -166,17 +176,31 @@ export async function runAgent(
     return errorMsg;
   }
 
+  // 1. Emit an SSE 'status' event immediately when request arrives (before model calls)
+  const changeCurrentRegex = /\b(still|changed|since|current|latest|now|pricing|new)\b/i;
+  const hasChangeWording = changeCurrentRegex.test(userMessage);
+  const hasPastReference =
+    /\b(last|previous|yesterday|ago|since|earlier|before|shortlisted|asked you|remember|this morning)\b/i.test(userMessage) ||
+    /\b\d{1,2}\/\d{1,2}\b/.test(userMessage);
+
+  onEvent({
+    type: 'status',
+    message: hasPastReference ? 'Checking earlier conversation…' : 'Searching…'
+  });
+
   const modelName = process.env.MODEL_NAME || 'gemini-3.1-flash-lite';
   const effectiveUserId = options.userId || 'default-user';
   const effectiveTz = options.timezone || getUserTimezone(effectiveUserId) || getUserTimezone(sessionId) || 'UTC';
   const now = refDate;
   const isoNow = now.toISOString();
 
-  // 1. Save incoming user message to SQLite (computing date_str in user timezone)
-  insertMessage(sessionId, 'user', userMessage, isoNow, null, false, effectiveTz, effectiveUserId);
+  // 2. Pre-Retrieval Stage
+  const preRetrievalStart = performance.now();
 
-  // 2. Pre-Retrieval Context Resolution (before LLM call)
   const temporalRes = resolveTemporalContext(userMessage, sessionId, now, MAX_CONTEXT_CHARS, effectiveTz, effectiveUserId);
+  const memoryBlock = temporalRes.formattedContext ? temporalRes.formattedContext.trim() : 'none';
+  console.log(`[Agent Runner Request ${sessionId}] Retrieved Memory:\n${memoryBlock}`);
+
   if (temporalRes.matchedMessages.length > 0) {
     const datesDesc = temporalRes.detectedDates.length > 0
       ? temporalRes.detectedDates.join(', ')
@@ -187,13 +211,12 @@ export async function runAgent(
     });
   }
 
-  // 3. Assemble System Prompt & Conversation History in user timezone
-  const systemPrompt = buildSystemPrompt(now, temporalRes.formattedContext, effectiveTz);
+  // Insert current user message after resolving historical context so current message is not self-retrieved as past memory
+  insertMessage(sessionId, 'user', userMessage, isoNow, null, false, effectiveTz, effectiveUserId);
 
-  // Fetch recent messages for active session context (last 10 turns)
+  const systemPrompt = buildSystemPrompt(now, temporalRes.formattedContext, effectiveTz);
   const recentTurns = getRecentMessages(sessionId, 10, effectiveUserId);
 
-  // Build initial contents for Gemini SDK
   const contents: any[] = [];
   for (const turn of recentTurns) {
     contents.push({
@@ -202,187 +225,333 @@ export async function runAgent(
     });
   }
 
-  // Initialize Gemini client
-  const ai = new GoogleGenAI({ apiKey });
+  const preRetrievalDurationMs = Math.round(performance.now() - preRetrievalStart);
 
-  // Deterministic intent check before the first model call:
-  // If message contains change/current-state wording (still, changed, since, current, latest, now, pricing, new)
-  // or temporal resolver anchored to a past conversation, force first turn to call web_search.
-  const changeCurrentRegex = /\b(still|changed|since|current|latest|now|pricing|new)\b/i;
-  const hasChangeWording = changeCurrentRegex.test(userMessage);
+  // Initialize Gemini client & thinking budget (lowest supported: 0 = disabled)
+  const ai = new GoogleGenAI({ apiKey });
+  const effectiveThinkingBudget = typeof options.thinkingBudget === 'number'
+    ? options.thinkingBudget
+    : 0;
+
+  // Intent check before first model call:
   const hasAnchoredPastConvo =
     (temporalRes.hasTemporalReference || temporalRes.detectedDates.length > 0) &&
     temporalRes.matchedMessages.length > 0;
   const shouldForceSearchFirstTurn = hasChangeWording || hasAnchoredPastConvo;
 
-  let finalAnswer = '';
-  const maxIterations = 4;
-  let iteration = 0;
+  // Helper for per-call execution, timing, retry, and logging
+  async function executeGeminiCall(params: {
+    label: string;
+    mode: FunctionCallingConfigMode;
+    allowedFunctionNames?: string[];
+    streamTokens: boolean;
+  }): Promise<{
+    text: string;
+    functionCalls: any[];
+    modelContent: any;
+    durationMs: number;
+  }> {
+    const { label, mode, allowedFunctionNames, streamTokens } = params;
+    const callStart = performance.now();
 
-  try {
-    while (iteration < maxIterations) {
-      iteration++;
-
-      // Configure function calling mode: force ANY on iteration 1 if intent triggers, otherwise AUTO
-      const forceThisTurn = iteration === 1 && shouldForceSearchFirstTurn;
-      const functionCallingConfig = forceThisTurn
-        ? {
-          mode: FunctionCallingConfigMode.ANY,
-          allowedFunctionNames: ['web_search']
-        }
-        : {
-          mode: FunctionCallingConfigMode.AUTO
-        };
-
-      console.log(
-        `[Agent Runner Turn ${iteration}] Function calling path: ${forceThisTurn ? 'FORCED (mode: ANY)' : 'AUTO (mode: AUTO)'} ` +
-        `[reason: ${forceThisTurn ? (hasChangeWording ? 'change/current wording' : 'anchored past memory') : 'default/subsequent turn'}]`
-      );
-
-      const streamConfig: any = {
-        systemInstruction: systemPrompt,
-        tools: [{
-          functionDeclarations: [webSearchToolDeclaration]
-        }],
-        toolConfig: {
-          functionCallingConfig
-        },
-        temperature: 0.2,
-        maxOutputTokens: 1500
-      };
-
-      if (typeof options.thinkingBudget === 'number') {
-        streamConfig.thinkingConfig = {
-          thinkingBudget: options.thinkingBudget
-        };
-      }
-
-      // Request stream from Gemini with transient error backoff (429 rate limit or 503 high demand)
-      let responseStream: any = null;
-      let retriesLeft = 3;
-      while (retriesLeft >= 0) {
-        try {
-          responseStream = await ai.models.generateContentStream({
-            model: modelName,
-            contents,
-            config: streamConfig
-          });
-          break;
-        } catch (apiErr: any) {
-          const isRateLimit = apiErr?.status === 429 || String(apiErr?.message).includes('429');
-          const isHighDemand = apiErr?.status === 503 || String(apiErr?.message).includes('503');
-          if ((isRateLimit || isHighDemand) && retriesLeft > 0) {
-            retriesLeft--;
-            const delaySec = isRateLimit ? 12 : 3;
-            console.warn(`[Agent Runner] Gemini API ${isRateLimit ? '429 Rate Limit' : '503 High Demand'}. Backing off for ${delaySec}s before retry...`);
-            await new Promise((r) => setTimeout(r, delaySec * 1000));
-          } else {
-            throw apiErr;
-          }
-        }
-      }
-
-      let iterationText = '';
-      const functionCalls: any[] = [];
-      let modelContent: any = null;
-
-      for await (const chunk of responseStream) {
-        if (chunk.candidates?.[0]?.content) {
-          modelContent = chunk.candidates[0].content;
-        }
-
-        if (chunk.functionCalls && chunk.functionCalls.length > 0) {
-          for (const fc of chunk.functionCalls) {
-            functionCalls.push(fc);
-          }
-        }
-
-        // Only stream tokens if model is not calling tools
-        if (chunk.text && functionCalls.length === 0) {
-          iterationText += chunk.text;
-          onEvent({ type: 'token', content: chunk.text });
-        }
-      }
-
-      // Check if model requested tool execution
-      if (functionCalls.length > 0) {
-        // Append model's original turn to contents to preserve thought signatures
-        if (modelContent) {
-          contents.push(modelContent);
-        } else {
-          contents.push({
-            role: 'model',
-            parts: functionCalls.map((fc) => ({ functionCall: fc }))
-          });
-        }
-
-        const responseParts: any[] = [];
-
-        for (const call of functionCalls) {
-          if (call.name === 'web_search') {
-            const rawArgs = call.args as WebSearchArgs;
-            const queries = Array.isArray(rawArgs?.queries)
-              ? rawArgs.queries
-              : [String(rawArgs?.queries || '')];
-
-            onEvent({ type: 'tool_start', queries });
-
-            const startTime = Date.now();
-            const searchResults = await executeWebSearch(
-              rawArgs,
-              Boolean(options.forceSequentialSearch),
-              temporalRes.searchWindow?.startDate
-            );
-            const durationMs = Date.now() - startTime;
-
-            onEvent({
-              type: 'tool_end',
-              resultCount: searchResults.length,
-              durationMs
-            });
-
-            const funcResponseObj: any = {
-              name: call.name,
-              response: {
-                results: searchResults,
-                note: TAVILY_PUBLISH_DATE_NOTE
-              }
-            };
-            if (call.id) {
-              funcResponseObj.id = call.id;
-            }
-
-            responseParts.push({
-              functionResponse: funcResponseObj
-            });
-          }
-        }
-
-        // Append tool response turn to contents (in Gemini, role is 'user')
-        if (responseParts.length > 0) {
-          contents.push({
-            role: 'user',
-            parts: responseParts
-          });
-        }
-
-        // Continue loop to allow model to synthesize search results
-        continue;
-      }
-
-      // If no function call, iterationText is our final answer
-      finalAnswer = iterationText;
-      break;
+    const functionCallingConfig: any = { mode };
+    if (mode === FunctionCallingConfigMode.ANY && allowedFunctionNames) {
+      functionCallingConfig.allowedFunctionNames = allowedFunctionNames;
     }
 
-    if (!finalAnswer && iteration >= maxIterations) {
-      finalAnswer = 'Reached maximum reasoning steps without producing final answer.';
+    const streamConfig: any = {
+      systemInstruction: systemPrompt,
+      temperature: 0.2,
+      maxOutputTokens: 1500,
+      toolConfig: { functionCallingConfig },
+      thinkingConfig: { thinkingBudget: effectiveThinkingBudget }
+    };
+
+    if (mode !== FunctionCallingConfigMode.NONE) {
+      streamConfig.tools = [{ functionDeclarations: [webSearchToolDeclaration] }];
+    }
+
+    let responseStream: any = null;
+    let retryCount = 0;
+    let httpStatus = 200;
+
+    for (let attempt = 0; attempt <= 2; attempt++) {
+      try {
+        responseStream = await ai.models.generateContentStream({
+          model: modelName,
+          contents,
+          config: streamConfig
+        });
+        httpStatus = 200;
+        break;
+      } catch (apiErr: any) {
+        const status = apiErr?.status || (String(apiErr?.message).includes('429') ? 429 : String(apiErr?.message).includes('503') ? 503 : 500);
+        httpStatus = status;
+        const isRetryable = status === 429 || status === 503;
+        if (isRetryable && attempt < 2) {
+          retryCount = attempt + 1;
+          const backoffMs = (attempt + 1) * (status === 429 ? 2500 : 2000);
+          console.warn(`[Agent Runner ${label}] Gemini API ${status}. Emitting status event and retrying with backoff ${backoffMs}ms...`);
+          onEvent({ type: 'status', message: 'Model busy, retrying…' });
+          await new Promise((r) => setTimeout(r, backoffMs));
+          continue;
+        }
+        throw apiErr;
+      }
+    }
+
+    let accumulatedText = '';
+    const calls: any[] = [];
+    let modelContent: any = null;
+    let inputTokens = 0;
+    let outputTokens = 0;
+
+    for await (const chunk of responseStream) {
+      if (chunk.candidates?.[0]?.content) {
+        modelContent = chunk.candidates[0].content;
+      }
+      if (chunk.usageMetadata) {
+        inputTokens = chunk.usageMetadata.promptTokenCount ?? inputTokens;
+        outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
+      }
+      if (chunk.functionCalls && chunk.functionCalls.length > 0) {
+        for (const fc of chunk.functionCalls) {
+          calls.push(fc);
+        }
+      }
+      if (chunk.text && streamTokens && calls.length === 0) {
+        accumulatedText += chunk.text;
+        onEvent({ type: 'token', content: chunk.text });
+      } else if (chunk.text && !streamTokens) {
+        accumulatedText += chunk.text;
+      }
+    }
+
+    const durationMs = Math.round(performance.now() - callStart);
+    console.log(
+      `[Agent Runner ${label}] Model: ${modelName} | Duration: ${durationMs}ms | HTTP: ${httpStatus} | Retries: ${retryCount} | Thinking: ${JSON.stringify({ thinkingBudget: effectiveThinkingBudget })} | Tokens: ${inputTokens} in / ${outputTokens} out`
+    );
+
+    return {
+      text: accumulatedText,
+      functionCalls: calls,
+      modelContent,
+      durationMs
+    };
+  }
+
+  let stageLlm1Ms = 0;
+  let stageSearchMs = 0;
+  let stageLlm2Ms = 0;
+  let totalSearchCalls = 0;
+  let finalAnswer = '';
+
+  try {
+    // ─── Turn 1: Search Dispatch (or direct answer if no-search) ───
+    const turn1Mode = shouldForceSearchFirstTurn
+      ? FunctionCallingConfigMode.ANY
+      : FunctionCallingConfigMode.AUTO;
+
+    console.log(
+      `[Agent Runner Turn 1] Function calling path: ${shouldForceSearchFirstTurn ? 'FORCED (mode: ANY)' : 'AUTO (mode: AUTO)'} ` +
+      `[reason: ${shouldForceSearchFirstTurn ? (hasChangeWording ? 'change/current wording' : 'anchored past memory') : 'default'}]`
+    );
+
+    const call1 = await executeGeminiCall({
+      label: 'LLM call 1',
+      mode: turn1Mode,
+      allowedFunctionNames: ['web_search'],
+      streamTokens: true
+    });
+
+    stageLlm1Ms = call1.durationMs;
+
+    if (call1.functionCalls.length === 0) {
+      // Direct text answer (no tool call was needed)
+      finalAnswer = call1.text;
+      console.log(`[Agent Runner Request ${sessionId}] Top 5 Search Results: none`);
+    } else {
+      // Model called web_search
+      if (call1.modelContent) {
+        contents.push(call1.modelContent);
+      } else {
+        contents.push({
+          role: 'model',
+          parts: call1.functionCalls.map((fc) => ({ functionCall: fc }))
+        });
+      }
+
+      let turn1Results: WebSearchResultItem[] = [];
+      let retryResults: WebSearchResultItem[] = [];
+      const responseParts: any[] = [];
+      const effectiveSearchStartDate = temporalRes.searchWindow?.startDate;
+
+      for (const call of call1.functionCalls) {
+        if (call.name === 'web_search') {
+          totalSearchCalls++;
+          const rawArgs = call.args as WebSearchArgs;
+          const queries = Array.isArray(rawArgs?.queries) ? rawArgs.queries : [String(rawArgs?.queries || '')];
+          onEvent({ type: 'tool_start', queries });
+
+          const searchStart = performance.now();
+          const results = options.mockSearchResults
+            ? options.mockSearchResults
+            : await executeWebSearch(
+                rawArgs,
+                Boolean(options.forceSequentialSearch),
+                effectiveSearchStartDate,
+                'basic' // Default 'basic' depth
+              );
+          const searchDur = Math.round(performance.now() - searchStart);
+          stageSearchMs += searchDur;
+
+          onEvent({
+            type: 'tool_end',
+            resultCount: results.length,
+            durationMs: searchDur
+          });
+
+          turn1Results.push(...results);
+
+          const funcResponseObj: any = {
+            name: call.name,
+            response: {
+              results,
+              note: TAVILY_PUBLISH_DATE_NOTE
+            }
+          };
+          if (call.id) funcResponseObj.id = call.id;
+          responseParts.push({ functionResponse: funcResponseObj });
+        }
+      }
+
+      if (responseParts.length > 0) {
+        contents.push({ role: 'user', parts: responseParts });
+      }
+
+      // Check if ONE extra search is allowed:
+      // Zero results OR all results older than search window
+      let allowExtraSearch = false;
+      let extraSearchReason = '';
+
+      if (turn1Results.length === 0) {
+        allowExtraSearch = true;
+        extraSearchReason = 'Turn 1 returned zero results';
+      } else if (effectiveSearchStartDate) {
+        const windowStart = effectiveSearchStartDate;
+        const datedResults = turn1Results.filter((r) => Boolean(r.published_date));
+        if (datedResults.length > 0 && datedResults.every((r) => r.published_date! < windowStart)) {
+          allowExtraSearch = true;
+          extraSearchReason = `All ${datedResults.length} dated results are older than search window startDate (${windowStart})`;
+        }
+      }
+
+      // Execute allowed retry search if triggered and within hard cap of 2 calls
+      if (allowExtraSearch && totalSearchCalls < 2) {
+        console.log(`[Search Policy] Triggering allowed retry search: ${extraSearchReason}`);
+
+        const retryCall = await executeGeminiCall({
+          label: 'LLM call retry',
+          mode: FunctionCallingConfigMode.AUTO,
+          allowedFunctionNames: ['web_search'],
+          streamTokens: false
+        });
+
+        if (retryCall.functionCalls.length > 0) {
+          if (retryCall.modelContent) {
+            contents.push(retryCall.modelContent);
+          } else {
+            contents.push({
+              role: 'model',
+              parts: retryCall.functionCalls.map((fc) => ({ functionCall: fc }))
+            });
+          }
+
+          const retryResponseParts: any[] = [];
+          for (const call of retryCall.functionCalls) {
+            if (call.name === 'web_search') {
+              totalSearchCalls++;
+              const rawArgs = call.args as WebSearchArgs;
+              const queries = Array.isArray(rawArgs?.queries) ? rawArgs.queries : [String(rawArgs?.queries || '')];
+              onEvent({ type: 'tool_start', queries });
+
+              const searchStart = performance.now();
+              // Use 'advanced' search depth only on that one allowed retry
+              const results = options.mockSearchResults
+                ? options.mockSearchResults
+                : await executeWebSearch(
+                    rawArgs,
+                    Boolean(options.forceSequentialSearch),
+                    effectiveSearchStartDate,
+                    'advanced'
+                  );
+              const searchDur = Math.round(performance.now() - searchStart);
+              stageSearchMs += searchDur;
+
+              onEvent({
+                type: 'tool_end',
+                resultCount: results.length,
+                durationMs: searchDur
+              });
+
+              retryResults.push(...results);
+
+              const funcResponseObj: any = {
+                name: call.name,
+                response: {
+                  results,
+                  note: TAVILY_PUBLISH_DATE_NOTE
+                }
+              };
+              if (call.id) funcResponseObj.id = call.id;
+              retryResponseParts.push({ functionResponse: funcResponseObj });
+            }
+          }
+
+          if (retryResponseParts.length > 0) {
+            contents.push({ role: 'user', parts: retryResponseParts });
+          }
+        }
+      }
+
+      // 6. Log top 5 search results with URL and published date
+      const allSearchResults: WebSearchResultItem[] = [...turn1Results, ...retryResults];
+      const top5 = allSearchResults.slice(0, 5);
+      if (top5.length > 0) {
+        const top5Log = top5
+          .map((r, i) => `  ${i + 1}. [${r.published_date || 'No Date'}] ${r.url} - ${r.title}`)
+          .join('\n');
+        console.log(`[Agent Runner Request ${sessionId}] Top 5 Search Results:\n${top5Log}`);
+      } else {
+        console.log(`[Agent Runner Request ${sessionId}] Top 5 Search Results: none`);
+      }
+
+      // ─── Turn 2: Synthesis (toolConfig mode set to NONE) ───
+      const synthesisCall = await executeGeminiCall({
+        label: 'LLM call 2',
+        mode: FunctionCallingConfigMode.NONE, // Must answer from results
+        streamTokens: true // Streams 'token' SSE events as chunks arrive
+      });
+
+      stageLlm2Ms = synthesisCall.durationMs;
+      finalAnswer = synthesisCall.text;
+    }
+
+    if (!finalAnswer) {
+      finalAnswer = 'Completed search verification with available context.';
       onEvent({ type: 'token', content: finalAnswer });
     }
 
-    // 4. Save final assistant response to SQLite (computing date_str in user timezone)
+    // Save final assistant response to SQLite
     insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz, effectiveUserId);
     onEvent({ type: 'done' });
+
+    // Print per-request stage breakdown
+    const totalRequestMs = Math.round(performance.now() - requestStartTime);
+    console.log(
+      `[Agent Runner Stage Breakdown] Request ID: ${sessionId} | Pre-retrieval: ${preRetrievalDurationMs}ms | LLM call 1: ${stageLlm1Ms}ms | Search: ${stageSearchMs}ms | LLM call 2: ${stageLlm2Ms}ms | Total: ${totalRequestMs}ms`
+    );
+
     return finalAnswer;
 
   } catch (error: any) {

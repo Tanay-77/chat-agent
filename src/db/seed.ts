@@ -87,7 +87,11 @@ export function seedDatabase(
 
   if (force) {
     console.log(`[Seed] Force seeding enabled for user ${userId}. Clearing existing records...`);
-    clearDatabase(userId);
+    if (userId === 'default-user') {
+      clearDatabase();
+    } else {
+      clearDatabase(userId);
+    }
   }
 
   console.log(`[Seed] Calculating dynamic dates relative to: ${refDate.toISOString()}...`);

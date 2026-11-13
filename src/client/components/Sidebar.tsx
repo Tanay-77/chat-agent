@@ -2,6 +2,8 @@ import React from 'react';
 import { HistoricalMessage, QuickTestPrompt } from '../types.js';
 
 interface SidebarProps {
+  isOpen: boolean;
+  onToggleSidebar: () => void;
   timeline: Record<string, HistoricalMessage[]>;
   onSelectDate: (date: string, messages: HistoricalMessage[]) => void;
   onRunQuickTest: (prompt: string) => void;
@@ -31,22 +33,39 @@ const QUICK_TESTS: QuickTestPrompt[] = [
 ];
 
 export const Sidebar: React.FC<SidebarProps> = ({
+  isOpen,
+  onToggleSidebar,
   timeline,
   onSelectDate,
   onRunQuickTest,
   onResetDatabase,
   isLoading
 }) => {
+  if (!isOpen) return null;
+
   const sortedDates = Object.keys(timeline).sort().reverse();
 
   return (
     <aside className="app-sidebar">
       <div className="sidebar-brand">
-        <div className="brand-status-dot" />
-        <div>
-          <h2>Temporal Chat Agent</h2>
-          <span className="brand-subtitle">Gemini · SQLite · Tavily</span>
+        <div className="brand-info">
+          <div className="brand-status-dot" />
+          <div>
+            <h2>Temporal Chat Agent</h2>
+            <span className="brand-subtitle">Gemini · SQLite · Tavily</span>
+          </div>
         </div>
+        <button
+          type="button"
+          className="sidebar-close-btn"
+          onClick={onToggleSidebar}
+          title="Hide sidebar"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
       </div>
 
       <div className="sidebar-content">

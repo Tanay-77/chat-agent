@@ -298,47 +298,73 @@ export function resolveTemporalContext(
     }
   }
 
-  const hasTemporalReference = allDetectedDates.length > 0 ||
+  const hasDateReference = allDetectedDates.length > 0 || parsedDates.length > 0;
+  const hasExplicitChatReference =
+    /\b(we discussed|i asked|you said|we talked|we shortlisted|earlier conversation|earlier chat|previous discussion|you mentioned|as you said|as we discussed|did we discuss|did i ask|what did i ask|what did we decide)\b/i.test(userMessage);
+
+  const hasTemporalReference = hasDateReference ||
     /\b(last|previous|yesterday|ago|since|earlier|before|shortlisted|asked you|this morning|this evening)\b/i.test(userMessage);
+
+  // Plain factual question detection: asks what/how/who/when about current reality without personal/conversational anchors
+  const isPlainFactualQuestion =
+    !hasDateReference &&
+    !hasExplicitChatReference &&
+    /^(what('?s| is| are)|how much (is|does)|who is|when is|when was)\s+(the\s+)?(latest|current|newest|stable|price|pricing|version|status|release)\b/i.test(userMessage.trim()) &&
+    !/\b(we|i|my|our|you|discussed|shortlisted)\b/i.test(userMessage);
+
+  // BM25 relevance threshold when no explicit date reference or conversational anchor exists
+  const BM25_RELEVANCE_THRESHOLD = -2.0;
 
   const messageMap = new Map<number, Message>();
 
-  // 1. Date-range filtered retrieval scoped to user_id
-  for (const dateStr of allDetectedDates) {
-    const dateFtsMessages = searchMessagesFTS(userMessage, {
-      startDateStr: dateStr,
-      endDateStr: dateStr,
-      limit: 10,
-      userId
-    });
-    for (const msg of dateFtsMessages) {
-      messageMap.set(msg.id, msg);
-    }
+  // Only retrieve past conversation if NOT a plain factual question
+  if (!isPlainFactualQuestion) {
+    // 1. Date-range filtered retrieval scoped to user_id
+    if (hasDateReference) {
+      for (const dateStr of allDetectedDates) {
+        const dateFtsMessages = searchMessagesFTS(userMessage, {
+          startDateStr: dateStr,
+          endDateStr: dateStr,
+          limit: 10,
+          userId
+        });
+        for (const msg of dateFtsMessages) {
+          messageMap.set(msg.id, msg);
+        }
 
-    const dateAllMessages = searchMessagesByDateRange(null, dateStr, dateStr, userId);
-    for (const msg of dateAllMessages) {
-      if (!messageMap.has(msg.id)) {
-        messageMap.set(msg.id, { ...msg, rank: 0 });
+        const dateAllMessages = searchMessagesByDateRange(null, dateStr, dateStr, userId);
+        for (const msg of dateAllMessages) {
+          if (!messageMap.has(msg.id)) {
+            messageMap.set(msg.id, { ...msg, rank: 0 });
+          }
+        }
       }
     }
-  }
 
-  // 2. Cross-session FTS search across all dates scoped to user_id
-  const ftsMessages = searchMessagesFTS(userMessage, { limit: 20, userId });
-  for (const msg of ftsMessages) {
-    const existing = messageMap.get(msg.id);
-    if (!existing) {
-      messageMap.set(msg.id, msg);
-    } else if (typeof msg.rank === 'number' && (typeof existing.rank !== 'number' || msg.rank < existing.rank)) {
-      messageMap.set(msg.id, { ...existing, rank: msg.rank });
+    // 2. Cross-session FTS search across all dates scoped to user_id
+    const ftsMessages = searchMessagesFTS(userMessage, { limit: 20, userId });
+    for (const msg of ftsMessages) {
+      const existing = messageMap.get(msg.id);
+      const isStrongBm25 = typeof msg.rank === 'number' && msg.rank <= BM25_RELEVANCE_THRESHOLD;
+
+      // When there is no date reference and no explicit chat reference, only inject if BM25 score meets threshold
+      if (!hasDateReference && !hasExplicitChatReference && !isStrongBm25) {
+        continue;
+      }
+
+      if (!existing) {
+        messageMap.set(msg.id, msg);
+      } else if (typeof msg.rank === 'number' && (typeof existing.rank !== 'number' || msg.rank < existing.rank)) {
+        messageMap.set(msg.id, { ...existing, rank: msg.rank });
+      }
     }
-  }
 
-  // 3. Fallback: conversational recall phrasing scoped to user_id
-  if (messageMap.size === 0 && /\b(asked you|we shortlisted|we discussed|shortlisted|remember)\b/i.test(userMessage)) {
-    const recent = getRecentMessages(null, 6, userId);
-    for (const msg of recent) {
-      messageMap.set(msg.id, { ...msg, rank: 0 });
+    // 3. Fallback: conversational recall phrasing scoped to user_id
+    if (messageMap.size === 0 && (hasExplicitChatReference || /\b(asked you|we shortlisted|we discussed|shortlisted|remember)\b/i.test(userMessage))) {
+      const recent = getRecentMessages(null, 6, userId);
+      for (const msg of recent) {
+        messageMap.set(msg.id, { ...msg, rank: 0 });
+      }
     }
   }
 
@@ -418,7 +444,7 @@ export function resolveTemporalContext(
     formattedContext = contextNotes.join('\n');
   }
 
-  // Derive searchWindow from anchor date
+  // Derive searchWindow from anchor date (or default to 90 days for latest/current/newest queries)
   let anchorDate: string | undefined;
   if (selectedMessages.length > 0) {
     const matchedDetected = allDetectedDates.find(d => selectedMessages.some(m => m.date_str === d));
@@ -427,7 +453,13 @@ export function resolveTemporalContext(
     anchorDate = allDetectedDates[0];
   }
 
-  const searchWindow: SearchWindow | undefined = anchorDate ? { startDate: anchorDate } : undefined;
+  let searchWindow: SearchWindow | undefined;
+  if (anchorDate) {
+    searchWindow = { startDate: anchorDate };
+  } else if (/\b(latest|current|newest)\b/i.test(userMessage)) {
+    const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+    searchWindow = { startDate: formatDateInTz(ninetyDaysAgo, effectiveTz) };
+  }
 
   return {
     hasTemporalReference,

@@ -16,7 +16,8 @@ import {
   webSearchToolDeclaration,
   executeWebSearch,
   computeEffectiveStartDate,
-  TAVILY_PUBLISH_DATE_NOTE
+  TAVILY_PUBLISH_DATE_NOTE,
+  WebSearchResultItem
 } from './tools/webSearch.js';
 import { buildCalendarReference, buildSystemPrompt, runAgent, AgentEvent } from './agent/runner.js';
 import { signCookieValue, unsignCookieValue, parseCookies, USER_COOKIE_NAME } from './index.js';
@@ -27,6 +28,7 @@ async function runTests() {
 
   // 1. Seed & Memory Tests (with is_demo validation)
   console.log('[1/7] Testing Persistent Memory, Demo Tagging & Database Clearing...');
+  clearDatabase();
   const seedResult = seedDatabase(true, now);
   if (seedResult.messages.length !== 6) {
     throw new Error(`Expected 6 seeded messages, got ${seedResult.messages.length}`);
@@ -444,6 +446,15 @@ async function runTests() {
   if (!prompt.includes('Tavily filters by publish date')) {
     throw new Error('System prompt missing Tavily publish date disclaimer');
   }
+  if (!prompt.includes('Retrieved past conversation is what the USER said or what the assistant claimed earlier')) {
+    throw new Error('System prompt missing rule that retrieved memory is not a source of current facts');
+  }
+  if (!prompt.includes('Every version number, price, date, or status in the answer must appear in the search results provided')) {
+    throw new Error('System prompt missing strict factual grounding rule');
+  }
+  if (!prompt.includes('Cite sources inline, with a link to the specific page')) {
+    throw new Error('System prompt missing inline source citation instruction');
+  }
   console.log('Calendar reference & system prompt generation verified.');
 
   // 4. Web Search Tool Schema Tests
@@ -546,6 +557,7 @@ async function runTests() {
 
   // Test (b): The agent never fabricates a past turn
   console.log('  -> Running Test (b): Empty DB + "On Monday we shortlisted 5 CRM tools..."');
+  clearDatabase();
   let tokenContentB = '';
   const emptySessionB = 'session-empty-monday';
   const responseB = await runAgent(
@@ -767,7 +779,101 @@ async function runTests() {
   }
   console.log('  ✓ Per-user clearDatabase(userId) cleanly isolates deletion.');
 
-  console.log('\nAll 7 test suites passed successfully!');
+  // 8. Grounding, Pre-Retrieval Relevance & Memory Anti-Contamination Test
+  console.log('\n[8/8] Testing Grounding, Pre-Retrieval Relevance & Memory Anti-Contamination...');
+  const groundingUser = 'user-grounding-' + Date.now();
+  clearDatabase(groundingUser);
+
+  // Seed a past conversation containing stale/prior version claim
+  insertMessage(
+    'session-past-node',
+    'assistant',
+    'Node.js v22.11.0 is the latest LTS',
+    '2026-11-01T10:00:00Z',
+    null,
+    false,
+    'UTC',
+    groundingUser
+  );
+
+  // 1. Verify pre-retrieval relevance: plain factual question must NOT inject past conversation
+  const nodeQuery = "what's the latest stable Node.js?";
+  const plainFactualRes = resolveTemporalContext(
+    nodeQuery,
+    'session-eval-plain',
+    now,
+    MAX_CONTEXT_CHARS,
+    'UTC',
+    groundingUser
+  );
+
+  if (plainFactualRes.matchedMessages.length !== 0) {
+    throw new Error(
+      `Pre-retrieval relevance failed: plain factual question injected ${plainFactualRes.matchedMessages.length} messages from memory!`
+    );
+  }
+  if (plainFactualRes.formattedContext !== '') {
+    throw new Error(`Expected empty formattedContext for plain factual question, got: "${plainFactualRes.formattedContext}"`);
+  }
+
+  // 2. Verify 90-day search window defaulted for query with "latest" and no anchor date
+  if (!plainFactualRes.searchWindow || !plainFactualRes.searchWindow.startDate) {
+    throw new Error('Expected searchWindow with 90-day startDate for "latest" query without anchor date');
+  }
+  const ninetyDaysAgoExpected = formatDateInTz(new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000), 'UTC');
+  if (plainFactualRes.searchWindow.startDate !== ninetyDaysAgoExpected) {
+    throw new Error(`Expected 90-day window start ${ninetyDaysAgoExpected}, got ${plainFactualRes.searchWindow.startDate}`);
+  }
+  console.log('  ✓ Pre-retrieval relevance verified: plain factual query excluded from memory injection, 90-day window applied.');
+
+  // 3. Ask "what's the latest stable Node.js?" with mocked search result for Node 26.13.0
+  const mockNodeSearchResults: WebSearchResultItem[] = [
+    {
+      query: 'latest stable Node.js',
+      title: 'Node.js v26.13.0 Released',
+      url: 'https://nodejs.org/en/blog/release/v26.13.0',
+      published_date: '2026-11-10',
+      snippet: 'Node.js v26.13.0 is the current latest stable release. It features V8 engine 13.5, enhanced WebCrypto APIs, and updated ECMAScript features.',
+      note: TAVILY_PUBLISH_DATE_NOTE
+    }
+  ];
+
+  let nodeTokens = '';
+  const nodeResponse = await runAgent(
+    nodeQuery,
+    'session-node-live',
+    (ev) => {
+      if (ev.type === 'token') nodeTokens += ev.content;
+    },
+    now,
+    {
+      userId: groundingUser,
+      mockSearchResults: mockNodeSearchResults
+    }
+  );
+
+  const finalNodeAnswer = nodeResponse || nodeTokens;
+  console.log(`     Agent response: "${finalNodeAnswer.slice(0, 160)}..."`);
+
+  // Assert answer contains 26.13.0
+  if (!finalNodeAnswer.includes('26.13.0')) {
+    throw new Error(`Expected answer to state latest version 26.13.0 from search results, got: ${finalNodeAnswer}`);
+  }
+
+  // Assert answer must NOT repeat 22.11.0 from past memory
+  if (finalNodeAnswer.includes('22.11.0')) {
+    throw new Error(`Contamination failure! Answer repeated stale version 22.11.0 from past conversation: ${finalNodeAnswer}`);
+  }
+
+  // Assert inline citation link
+  if (!finalNodeAnswer.includes('https://nodejs.org/en/blog/release/v26.13.0')) {
+    throw new Error(`Answer missing inline markdown link citation to specific release page: ${finalNodeAnswer}`);
+  }
+
+  clearDatabase(groundingUser);
+  console.log('  ✓ Grounding & anti-contamination verified: Answer stated 26.13.0 and strictly avoided repeating 22.11.0.');
+
+  console.log('\nAll 8 test suites passed successfully!');
 }
 
 runTests().catch((err) => {

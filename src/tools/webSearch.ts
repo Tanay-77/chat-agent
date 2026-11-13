@@ -8,6 +8,7 @@ export interface WebSearchArgs {
   topic?: 'general' | 'news';
   start_date?: string;
   end_date?: string;
+  search_depth?: 'basic' | 'advanced';
 }
 
 export interface WebSearchResultItem {
@@ -83,6 +84,16 @@ export function clearSearchCache(): void {
   searchCache.clear();
 }
 
+let mockSearchResultsStore: WebSearchResultItem[] | null = null;
+
+export function setMockSearchResults(results: WebSearchResultItem[] | null): void {
+  mockSearchResultsStore = results;
+}
+
+export function getMockSearchResults(): WebSearchResultItem[] | null {
+  return mockSearchResultsStore;
+}
+
 /**
  * Executes a single search query against the Tavily API with timeout and retry.
  */
@@ -92,10 +103,11 @@ async function fetchTavilySearch(
   topic: 'general' | 'news' = 'general',
   startDate?: string,
   endDate?: string,
-  retries: number = 1
+  retries: number = 1,
+  searchDepth: 'basic' | 'advanced' = 'basic'
 ): Promise<WebSearchResultItem[]> {
   const normalizedQuery = query.trim().toLowerCase();
-  const cacheKey = `${topic}:${startDate || ''}:${endDate || ''}:${normalizedQuery}`;
+  const cacheKey = `${topic}:${searchDepth}:${startDate || ''}:${endDate || ''}:${normalizedQuery}`;
 
   // Return cached result if available
   const cached = getCachedSearch(cacheKey);
@@ -106,7 +118,7 @@ async function fetchTavilySearch(
   const payload: Record<string, any> = {
     api_key: apiKey,
     query: query.trim(),
-    search_depth: 'basic', // 'basic' depth cuts network latency from ~5s down to ~1.2-1.8s
+    search_depth: searchDepth, // 'basic' depth cuts network latency from ~5s down to ~1.2-1.8s
     include_answer: false,
     max_results: 5,
     topic
@@ -187,8 +199,18 @@ async function fetchTavilySearch(
 export async function executeWebSearch(
   args: WebSearchArgs,
   forceSequential: boolean = false,
-  resolverStartDate?: string
+  resolverStartDate?: string,
+  searchDepth: 'basic' | 'advanced' = 'basic'
 ): Promise<WebSearchResultItem[]> {
+  if (mockSearchResultsStore && mockSearchResultsStore.length > 0) {
+    const mocked = mockSearchResultsStore.map(item => ({
+      ...item,
+      note: TAVILY_PUBLISH_DATE_NOTE
+    }));
+    (mocked as any).note = TAVILY_PUBLISH_DATE_NOTE;
+    return mocked;
+  }
+
   const apiKey = process.env.TAVILY_API_KEY;
   if (!apiKey) {
     console.warn('[WebSearch Tool] TAVILY_API_KEY is not configured in environment.');
@@ -205,6 +227,7 @@ export async function executeWebSearch(
     return [];
   }
 
+  const depth = args.search_depth || searchDepth;
   const topic = args.topic === 'news' ? 'news' : 'general';
   const effectiveStartDate = computeEffectiveStartDate(args.start_date, resolverStartDate);
   const effectiveEndDate = args.end_date;
@@ -214,13 +237,13 @@ export async function executeWebSearch(
   if (forceSequential) {
     // Force sequential execution for benchmarking comparison
     for (const q of queries) {
-      const res = await fetchTavilySearch(q, apiKey, topic, effectiveStartDate, effectiveEndDate, 1);
+      const res = await fetchTavilySearch(q, apiKey, topic, effectiveStartDate, effectiveEndDate, 1, depth);
       nestedResults.push(res);
     }
   } else {
     // Execute all queries in parallel via Promise.all
     const searchPromises = queries.map((q) =>
-      fetchTavilySearch(q, apiKey, topic, effectiveStartDate, effectiveEndDate, 1)
+      fetchTavilySearch(q, apiKey, topic, effectiveStartDate, effectiveEndDate, 1, depth)
     );
     nestedResults = await Promise.all(searchPromises);
   }
@@ -239,6 +262,16 @@ export async function executeWebSearch(
       deduplicated.push(item);
     }
   }
+
+  // Sort deduplicated results to prefer most recently published dates
+  deduplicated.sort((a, b) => {
+    if (a.published_date && b.published_date) {
+      return b.published_date.localeCompare(a.published_date);
+    }
+    if (a.published_date && !b.published_date) return -1;
+    if (!a.published_date && b.published_date) return 1;
+    return 0;
+  });
 
   (deduplicated as any).note = TAVILY_PUBLISH_DATE_NOTE;
   return deduplicated;

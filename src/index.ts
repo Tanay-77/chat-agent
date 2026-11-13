@@ -368,8 +368,8 @@ app.post('/api/messages', (req: Request, res: Response) => {
 });
 
 export const server = (process.argv[1] && (
-  process.argv[1].replace(/\\/g, '/').endsWith('src/index.ts') ||
-  process.argv[1].replace(/\\/g, '/').endsWith('dist/index.js')
+  process.argv[1].replace(/\\/g, '/').endsWith('index.ts') ||
+  process.argv[1].replace(/\\/g, '/').endsWith('index.js')
 ))
   ? app.listen(PORT, () => {
     console.log(`[Server] Chat Agent server running on http://localhost:${PORT}`);

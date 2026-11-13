@@ -11,6 +11,8 @@ interface ChatAreaProps {
   isLoading: boolean;
   statusText: string;
   sessionId: string;
+  isSidebarOpen: boolean;
+  onToggleSidebar: () => void;
 }
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
@@ -20,7 +22,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onSendMessage,
   isLoading,
   statusText,
-  sessionId
+  sessionId,
+  isSidebarOpen,
+  onToggleSidebar
 }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -47,9 +51,23 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   return (
     <main className="chat-container">
       <header className="chat-navbar">
-        <div className="navbar-session">
-          <span className="session-tag">SESSION ID</span>
-          <span className="session-id">{sessionId}</span>
+        <div className="navbar-left">
+          <button
+            type="button"
+            className="sidebar-toggle-btn"
+            onClick={onToggleSidebar}
+            title={isSidebarOpen ? 'Hide sidebar' : 'Open sidebar'}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+              <line x1="9" y1="3" x2="9" y2="21" />
+            </svg>
+            <span>{isSidebarOpen ? 'Hide sidebar' : 'Open sidebar'}</span>
+          </button>
+          <div className="navbar-session">
+            <span className="session-tag">SESSION ID</span>
+            <span className="session-id">{sessionId}</span>
+          </div>
         </div>
         <div className="navbar-stats">
           <span>{messages.filter((m) => m.role === 'user').length} queries</span>
