@@ -1,312 +1,73 @@
 # DESIGN.md — Temporal Chat Agent Architecture
 
-> A senior engineering document explaining the architectural decisions, pipeline design,
-> and trade-offs in the Temporal Chat Agent system.
+## The Problem
+Build an agent that tracks technical decisions across past sessions ("What did I ask on Nov 3?", "Did our CRM shortlist from Monday change pricing?") without hallucinating past turns.
+**Core constraints:** Exactly one model-facing tool (`web_search`), no LLM date math, zero fabricated memories, and fast multi-entity search.
 
----
-
-## System Architecture
-
-```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│  CLIENT  (React SPA — SSE Consumer)                                             │
-│  ┌──────────────┐  ┌──────────────────┐  ┌─────────────────────────────────────┐│
-│  │  Sidebar      │  │  Chat Messages   │  │  Agent Trace Pills                 ││
-│  │  - Timeline   │  │  - Markdown      │  │  - Retrieved dates from SQLite     ││
-│  │  - Quick Test │  │  - Tables/Links  │  │  - Parallel web_search queries     ││
-│  │  - Reset DB   │  │  - Live stream   │  │  - Result count + latency (ms)     ││
-│  └──────────────┘  └──────────────────┘  └─────────────────────────────────────┘│
-└────────────────────────────────────┬─────────────────────────────────────────────┘
-                                     │
-                          POST /api/chat (SSE Stream)
-                                     │
-                                     ▼
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│  EXPRESS SERVER  (src/index.ts)                                                  │
-│                                                                                  │
-│  ┌─────────────────────────────────────────────────────────────────────────────┐ │
-│  │  STEP 1: Pre-Retrieval Pipeline  (BEFORE the LLM runs)                     │ │
-│  │  ┌──────────────────────────────────────────────────┐                      │ │
-│  │  │  1a. Save user message → SQLite (messages table) │                      │ │
-│  │  └──────────────────────────────────────────────────┘                      │ │
-│  │  ┌──────────────────────────────────────────────────────────────────────┐  │ │
-│  │  │  1b. resolveTemporalContext(userMessage, sessionId, now)            │  │ │
-│  │  │      ┌──────────────────────────────────────────────────┐           │  │ │
-│  │  │      │  Parse explicit dates:  "3 November" → 2026-11-03│           │  │ │
-│  │  │      │  Parse relative days:   "Monday" → 2026-11-09    │           │  │ │
-│  │  │      │  Sanitize query tokens for safe SQLite FTS5 MATCH│           │  │ │
-│  │  │      └──────────────┬───────────────────────────────────┘           │  │ │
-│  │  │                     │                                               │  │ │
-│  │  │                     ▼                                               │  │ │
-│  │  │      ┌──────────────────────────────────────────────────────────┐   │  │ │
-│  │  │      │  SQLite FTS5 BM25 + Date-Range Search                   │   │  │ │
-│  │  │      │  searchMessagesFTS(userMessage, { dateRange })           │   │  │ │
-│  │  │      │  - messages_fts virtual table over message content       │   │  │ │
-│  │  │      │  - Sync triggers: messages_ai, messages_ad, messages_au  │   │  │ │
-│  │  │      │  - Prioritizes date relevance + BM25 ranking             │   │  │ │
-│  │  │      │  - Capped to character budget (MAX_CONTEXT_CHARS)        │   │  │ │
-│  │  │      └──────────────┬───────────────────────────────────────────┘   │  │ │
-│  │  │                     │                                               │  │ │
-│  │  │                     ▼                                               │  │ │
-│  │  │      ┌──────────────────────────────────────────────────┐           │  │ │
-│  │  │      │  retrievedPastContext (formatted text block)      │           │  │ │
-│  │  │      │  with timestamps, roles, and full message content │           │  │ │
-│  │  │      └──────────────────────────────────────────────────┘           │  │ │
-│  │  └──────────────────────────────────────────────────────────────────────┘  │ │
-│  │  ┌──────────────────────────────────────────────────────────────────────┐  │ │
-│  │  │  1c. Build System Prompt                                            │  │ │
-│  │  │      - 14-day rolling calendar reference table                      │  │ │
-│  │  │      - Injected retrievedPastContext                                │  │ │
-│  │  │      - Operational rules (decompose, temporal-diff, cite)           │  │ │
-│  │  └──────────────────────────────────────────────────────────────────────┘  │ │
-│  └─────────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                  │
-│  ┌─────────────────────────────────────────────────────────────────────────────┐ │
-│  │  STEP 2: Gemini ReAct Tool Loop  (max 4 iterations)                        │ │
-│  │                                                                             │ │
-│  │  ┌───────────────────────────┐                                             │ │
-│  │  │  Gemini generateContent   │──── text tokens ──► SSE {type:'token'}       │ │
-│  │  │  (streaming mode)         │                                             │ │
-│  │  └──────────┬────────────────┘                                             │ │
-│  │             │ functionCall: web_search                                      │ │
-│  │             ▼                                                              │ │
-│  │  ┌──────────────────────────────────────────────────────────────────────┐  │ │
-│  │  │  BATCHED PARALLEL WEB SEARCH                                        │  │ │
-│  │  │  queries: ["HubSpot pricing 2026", "Pipedrive pricing", ...]        │  │ │
-│  │  │                                                                      │  │ │
-│  │  │  Promise.all([                                                       │  │ │
-│  │  │    fetchTavily("HubSpot pricing 2026"),  ─── 8s timeout each        │  │ │
-│  │  │    fetchTavily("Pipedrive pricing"),      ─── AbortController       │  │ │
-│  │  │    fetchTavily("Attio CRM pricing"),      ─── Retry on 5xx         │  │ │
-│  │  │    fetchTavily("Close CRM plans"),                                   │  │ │
-│  │  │    fetchTavily("Folk CRM pricing"),                                  │  │ │
-│  │  │  ])                                                                  │  │ │
-│  │  │           │                                                          │  │ │
-│  │  │           ▼                                                          │  │ │
-│  │  │  URL Deduplication → Clean results array                             │  │ │
-│  │  └──────────────────────────────────────────────────────────────────────┘  │ │
-│  │             │                                                              │ │
-│  │             ▼                                                              │ │
-│  │  ┌───────────────────────────────────────────────┐                        │ │
-│  │  │  Temporal Diff Synthesis                       │                        │ │
-│  │  │  Gemini compares:                              │                        │ │
-│  │  │    Baseline (past convo) vs. Live (web search) │                        │ │
-│  │  │  Generates markdown diff with citations        │                        │ │
-│  │  └───────────────────────────────────────────────┘                        │ │
-│  └─────────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                  │
-│  ┌─────────────────────────────────────────────────────────────────────────────┐ │
-│  │  STEP 3: Post-Processing                                                   │ │
-│  │  - Save assistant response → SQLite with ISO timestamp                     │ │
-│  │  - Emit SSE {type:'done'} to client                                        │ │
-│  └─────────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                  │
-│  ┌─────────────────────────────────────────────────────────────────────────────┐ │
-│  │  DATA LAYER: SQLite (data/chat.db, WAL mode)                               │ │
-│  │  ┌──────────────────────────────────────────┐                              │ │
-│  │  │  messages                                │                              │ │
-│  │  │  ├── id (PK, autoincrement)              │                              │ │
-│  │  │  ├── session_id (indexed)                │                              │ │
-│  │  │  ├── role ('user' | 'assistant')         │                              │ │
-│  │  │  ├── content (TEXT)                      │                              │ │
-│  │  │  ├── created_at (ISO 8601, indexed)      │                              │ │
-│  │  │  ├── date_str (YYYY-MM-DD, indexed)      │                              │ │
-│  │  │  ├── keywords (deprecated / compat note) │                              │ │
-│  │  │  └── is_demo (INTEGER, default 0, indexed│                              │ │
-│  │  └──────────────────────────────────────────┘                              │ │
-│  │  ┌──────────────────────────────────────────┐                              │ │
-│  │  │  messages_fts (FTS5 Virtual Table)       │                              │ │
-│  │  │  ├── content (BM25 full-text indexing)   │                              │ │
-│  │  │  └── synced via triggers:                │                              │ │
-│  │  │      messages_ai, messages_ad,           │                              │ │
-│  │  │      messages_au                         │                              │ │
-│  │  └──────────────────────────────────────────┘                              │ │
-│  └─────────────────────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────────────────────┘
+## Architecture Overview
+```mermaid
+flowchart TD
+  Client[Client: React SPA] -->|POST /api/chat + Signed Cookie| Server[Express: Signed Cookie Auth]
+  Server -->|1. Parse Dates & TZ| Resolver[chrono-node Temporal Resolver]
+  Resolver -->|2. Scoped FTS5 BM25| SQLite[(SQLite: messages & FTS5)]
+  Server -->|3. System Prompt + Injected Memory| Gemini[Gemini 2.5 / Flash-Lite]
+  Gemini -->|4. web_search queries: []| Tavily[Tavily API: Promise.all Fan-out]
+  Tavily -->|5. Snippets + URLs| Gemini
+  Gemini -->|6. Temporal Diff + Citations| Client
 ```
 
----
+## Decisions & Rejected Alternatives
+1. **Deterministic Pre-Retrieval vs. Memory Tool**:
+   - *Choice:* Query SQLite FTS5 in Node.js before the model turn; inject matched turns into the prompt.
+   - *Rejected:* A `recall_memory` tool. Violated the single-tool constraint, added an LLM round-trip, and failed when the model miscalculated anchor dates.
+2. **chrono-node + Client Timezone vs. LLM / Regex Date Math**:
+   - *Choice:* Client passes IANA timezone (e.g. `Asia/Kolkata`); chrono-node anchors relative phrases ("last week", "yesterday") and resolves ambiguous dates (11/3 as DD/MM in India, MM/DD in US).
+   - *Rejected:* Pure regex (brittle) or model arithmetic (frequently wrong across midnight and week boundaries).
+3. **Batched Parallel Search (`queries: string[]`) vs. Sequential Calls**:
+   - *Choice:* Single `web_search` declaration accepting 1–6 queries executed concurrently via `Promise.all` with URL deduplication.
+   - *Rejected:* Single query per call. Comparing 5 CRMs sequentially took ~12s and 5 model turns.
+4. **Signed httpOnly Cookie (`user_id`) vs. Unscoped Sessions**:
+   - *Choice:* HMAC-SHA256 signed cookie with random UUID. All SQLite queries (`messages`, `messages_fts`) filter on `user_id = ?`, allowing cross-session recall only within that user.
+   - *Rejected:* Global queries with `sessionId = null`, which leaked User B's conversations into User A's context.
+5. **Deterministic First-Turn Tool Forcing on Change Words**:
+   - *Choice:* If prompt contains change words (*changed*, *since*, *latest*, *pricing*) or past memory is retrieved, force function calling `mode: ANY` on turn 1.
+   - *Rejected:* Pure `AUTO` mode, which sometimes answered from training weights without verifying online reality.
 
-## Key Design Decisions
+## Behavior When Memory Is Missing
+When the database is empty or lacks matching historical context, prompt rules strictly forbid simulating prior discussions. The agent reports that no historical record exists for that date or topic and asks the user to provide context. It never invents past shortlists or questions.
 
-### 1. Why Memory Is Pre-Retrieval, Not a Tool
+## Measured Latency (bench/results.json)
+Cold benchmark (search cache cleared per request, Gemini 3.1 Flash-Lite, 8 runs):
+| Category | Runs | TTFT p50 | Total p50 | Search p50 | Tool Calls |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `no-search` | 2 | 21.4s | 21.6s | 2.36s | 1.0 |
+| `single-search` | 2 | 23.5s | 23.7s | 3.61s | 1.0 |
+| `multi-entity-search` | 2 | 14.6s | 16.2s | 1.73s | 1.0 |
+| `follow-up` | 2 | 9.59s | 10.96s | 3.24s | 1.0 |
+| **Overall Cold** | **8** | **19.5s** | **20.8s** | **2.36s** | **1.0 (0 fails)** |
 
-The challenge imposes a strict constraint: **the LLM has exactly ONE tool — `web_search`**. No `recall_memory`, no `lookup_history`, no second tool.
+- **Warm Suite** (search cache active): Overall TTFT p50: 4.85s | Total p50: 5.78s | Search p50: 2.15s.
+- **Parallel vs Sequential** (5 cold runs each on 3-CRM comparison):
+  - Parallel search: median 1,702 ms (range 1,600 – 1,745 ms)
+  - Sequential search: median 2,033 ms (range 1,533 – 3,891 ms)
 
-The naive approach would be to make memory a second tool and hope the LLM calls it. This violates the rules. Even if it didn't, it introduces failure modes:
+## Transcripts on Empty Database
+1. **Prompt:** *"What did I ask you on 3 November? Is your answer still correct today?"*
+   - **Response:** *"I have no record of any conversation or questions from you on 3 November 2026. My historical memory only contains the current interaction. Please share what you asked..."* (0 hallucinations).
+2. **Prompt:** *"On Monday we shortlisted 5 CRM tools for a 20-person sales team. Has any of them changed pricing?"*
+   - **Response:** *"I have no record of a previous conversation or a CRM shortlist from this past Monday (November 9, 2026). Please provide the shortlist or specify which tools you'd like me to check..."*
+3. **Prompt:** *"What is the current stable release version of Next.js?"*
+   - **Response:** Dispatches `web_search(["Next.js current stable release version"])` and answers: *"The current stable release line is Next.js 16, with active patch releases (v16.4.x) and Next.js 15 in maintenance LTS."* (includes source links).
 
-- The LLM might forget to call it, or call it with the wrong date.
-- It adds an extra round-trip before the LLM can even begin reasoning about changes.
-- LLMs are bad at date arithmetic. Given "last Tuesday," the model might hallucinate a wrong date and retrieve nothing.
+## Known Limitations
+1. **Tavily publish-date filtering**: Tavily filters by original article publish date; pages updated or edited post-publish may be omitted from narrow date windows.
+2. **Snippets-only content**: `web_search` receives search result text excerpts, not full rendered web pages or dynamic client-side JS content.
+3. **Single-node SQLite**: `better-sqlite3` uses synchronous file I/O with a single-writer lock; horizontal scaling requires an external database.
 
-**Our solution: deterministic pre-retrieval.** Before the LLM sees the prompt at all, Node.js code:
-
-1. Parses temporal references (`"3 November"` → `2026-11-03`, `"Monday"` → `2026-11-09`) using regex and calendar math — zero LLM involvement.
-2. Queries SQLite cross-session combining date-range filters with SQLite FTS5 BM25 ranking (`messages_fts`) over sanitized user terms — zero reliance on hardcoded keyword lists.
-3. Injects the matched historical turns directly into the system prompt as a structured `[RETRIEVED PAST CONVERSATION MEMORY]` block, capped to a strict character budget with full timestamps.
-
-The LLM receives its context pre-assembled. It never needs to "decide" to look up memory. It just sees the past conversation alongside today's question and can immediately reason about what to verify via `web_search`.
-
-**Result:** Zero extra LLM round-trips for memory, zero risk of wrong-date hallucination, and full compliance with the one-tool rule.
-
----
-
-### 2. Solving the Multi-Entity Latency Trap
-
-Consider the prompt: *"On Monday we shortlisted 5 CRM tools. Has any of them changed pricing?"*
-
-A naive single-query search tool would force the LLM through this loop:
-
-```
-Turn 1:  web_search("HubSpot Sales Hub pricing")     ~2.4s
-Turn 2:  web_search("Pipedrive pricing changes")      ~2.4s
-Turn 3:  web_search("Attio CRM pricing")              ~2.4s
-Turn 4:  web_search("Close CRM plans")                ~2.4s
-Turn 5:  web_search("Folk CRM pricing")               ~2.4s
-                                            Total: ~12s + 5 LLM round-trips
-```
-
-Five sequential tool calls. Five LLM round-trips just to dispatch searches. The user waits 12+ seconds before the model can even begin synthesizing.
-
-**Our solution: batched array queries.**
-
-The `web_search` tool accepts `queries: string[]` — an array of 1 to 6 search strings. Under the hood, `executeWebSearch` fires them all concurrently via `Promise.all()`:
-
-```
-Turn 1:  web_search({
-           queries: [
-             "HubSpot Sales Hub pricing 2026",
-             "Pipedrive pricing changes",
-             "Attio CRM pricing",
-             "Close CRM plans",
-             "Folk CRM pricing"
-           ],
-           days_back: 7
-         })
-                                 ──► Promise.all() ──► ~1.2s total, 1 LLM round-trip
-```
-
-**Gains:**
-- **Latency**: 5 sequential requests (~12s) → 1 parallel fan-out (~1.2s). **10× faster.**
-- **LLM Round-Trips**: 5 → 1. Each round-trip costs ~800ms of model inference time.
-- **URL Deduplication**: If multiple queries return the same page (e.g., a vendor's pricing page), we deduplicate by URL so the LLM doesn't process redundant content.
-
-Each individual Tavily request has an **8-second `AbortController` timeout** so one slow provider can never hang the entire fan-out.
-
----
-
-### 3. Deterministic Relative Date Grounding
-
-LLMs are unreliable at date arithmetic. Ask GPT-4 or Gemini "What date was last Tuesday?" on a Thursday, and you'll get wrong answers ~20-30% of the time. The model doesn't have a reliable internal calendar.
-
-**Our solution: inject a 14-day rolling calendar lookup table** directly into the system prompt.
-
-```
-TODAY: Thursday, Nov 12, 2026 (2026-11-12 12:00 UTC)
-RELATIVE CALENDAR MAPPING (Past 14 Days Reference):
-- 2026-11-12 (Thursday, Nov 12) [TODAY]
-- 2026-11-11 (Wednesday, Nov 11) [YESTERDAY]
-- 2026-11-10 (Tuesday, Nov 10) [2 days ago]
-- 2026-11-09 (Monday, Nov 9) [3 days ago]
-- 2026-11-08 (Sunday, Nov 8) [4 days ago]
-- 2026-11-07 (Saturday, Nov 7) [5 days ago]
-- 2026-11-06 (Friday, Nov 6) [6 days ago]
-- 2026-11-05 (Thursday, Nov 5) [7 days ago]
-- 2026-11-04 (Wednesday, Nov 4) [8 days ago]
-- 2026-11-03 (Tuesday, Nov 3) [9 days ago]
-  ...
-```
-
-Now when the user asks "Last Tuesday I asked about Postgres hosting," the LLM doesn't need to compute anything. It looks at the table, sees `2026-11-10 (Tuesday) [2 days ago]`, and correctly references the historical data retrieved for that date. Meanwhile, our pre-retrieval pipeline already resolved `"last Tuesday"` → `2026-11-10` deterministically in Node.js and fetched the matching turns.
-
-The LLM and the pre-retrieval code agree on the same dates because they both derive from the same `new Date()` reference point.
-
----
-
-### 4. Dynamic Seed Dates & Explicit Demo Seeding (`npm run seed:demo`)
-
-A production-grade system must not pollute cold databases with fabricated records. To guarantee data hygiene:
-1. **Empty by Default**: On server startup, a fresh SQLite database (`data/chat.db`) boots completely empty. No fabricated conversations are seeded automatically.
-2. **Explicit Demo Seeding (`npm run seed:demo`)**: Benchmark evaluation conversations are placed behind an explicit command.
-3. **Demo Isolation (`is_demo` column)**: The `messages` table schema includes an indexed `is_demo INTEGER NOT NULL DEFAULT 0` column. Seeded rows are flagged with `is_demo = 1`, while live user conversations always record `is_demo = 0`.
-4. **Empty Reset (`POST /api/reset`)**: Calling the reset endpoint immediately executes `clearDatabase()`, wiping all rows and returning the database to a clean, empty state (0 messages), never auto-reseeding behind the user's back.
-
-When demo conversations are seeded, they use **relative date calculations**, not hardcoded dates:
-- `"3 November"`: Uses the most recent November 3rd strictly in the past relative to `new Date()`.
-- `"Last Tuesday"`: Computes `(currentDayOfWeek - 2 + 7) % 7` with `diff === 0 ? 7 : diff`.
-- `"Monday"`: Computes `(currentDayOfWeek - 1 + 7) % 7` with the same zero-guard.
-
-This means if an evaluator runs the app on December 1st, the seeded "last Tuesday" conversation lands on November 25th (not a stale October date). The temporal resolver's regex-based parser uses the same arithmetic, so the two always agree.
-
----
-
-### 5. Strict Anti-Fabrication Rule (No Conversation Hallucination)
-
-One of the most dangerous failure modes in LLM-based memory agents is **conversational hallucination**: when a user asks *"What did I ask on 3 November?"* or *"On Monday we shortlisted 5 CRM tools..."*, an unconstrained LLM will often invent a plausible-sounding past turn out of thin air.
-
-**Our solution: hard prompt constraints + negative assertions.**
-
-In `src/agent/runner.ts`, rule 5 of the system prompt enforces:
-```
-5. STRICT ANTI-FABRICATION RULE (NO CONVERSATION HALLUCINATION):
-   - If the user refers to a past conversation, prior discussion, shortlist, question, or specific date (e.g., "what did I ask on 3 November?", "on Monday we shortlisted...", "last Tuesday I asked you about..."), and the HISTORICAL CONVERSATION MEMORY section above is empty or does NOT contain any matching record of that conversation:
-     * You MUST explicitly state that you have no record of that prior conversation or question for that date/topic.
-     * Ask the user to share the details or provide context.
-     * You must NEVER invent, assume, simulate, or fabricate prior conversation content, previous questions, or past shortlists.
-```
-
-**Automated Verification**:
-Our test suite in `src/test.ts` validates this behavior against an empty database:
-- `Test (a)`: Empty DB + "What did I ask on 3 November?" → Verifies agent explicitly states it has no record of the prior conversation and does not invent Next.js or Claude versions.
-- `Test (b)`: Empty DB + "On Monday we shortlisted 5 CRM tools..." → Verifies agent states it has no record of the shortlist and asks the user to provide the shortlist details instead of hallucinating 5 CRM vendors.
-
----
-
-### 6. SSE Streaming & Agent Trace
-
-The frontend consumes `POST /api/chat` as a Server-Sent Events stream. Each SSE frame is a JSON object:
-
-| Event Type    | Payload                                          | Purpose                                  |
-|--------------|--------------------------------------------------|------------------------------------------|
-| `status`     | `{ message: "Retrieved memory from Nov 9..." }`  | Pre-retrieval progress indicator         |
-| `tool_start` | `{ queries: ["HubSpot pricing 2026", ...] }`     | Shows which searches were dispatched     |
-| `tool_end`   | `{ resultCount: 15, durationMs: 820 }`           | Search completion + latency measurement  |
-| `token`      | `{ content: "Based on the current..." }`         | Streamed model output (incremental text) |
-| `error`      | `{ error: "Rate limit exceeded" }`               | Error reporting                          |
-| `done`       | `{}`                                             | Stream termination signal                |
-
-The frontend accumulates `status`, `tool_start`, `tool_end`, and `error` events into an **Agent Trace** array. This is displayed as a collapsible pill above each assistant reply, showing the full retrieval-search-synthesis pipeline at a glance.
-
----
-
-## Trade-offs & Production Next Steps
-
-### Current Limitations & Production Evolution
-
-1. **Semantic / Embedding Vector Search**: While SQLite FTS5 BM25 handles arbitrary keyword queries generically without curated keyword lists, pure lexical matching does not understand synonyms ("database hosting" vs. "Postgres hosting" unless "hosting" matches). For true semantic recall, embedding vectors (`text-embedding-004`) in `sqlite-vec` or `pgvector` would complement FTS5 in a hybrid RRF (Reciprocal Rank Fusion) pipeline.
-
-2. **No JS-rendered page scraping**: Tavily returns snippets, not full page content. If a vendor updates pricing only on a JavaScript-heavy interactive page (no static text), the search results may not capture the change.
-
-3. **Single-node SQLite**: `better-sqlite3` is synchronous and single-writer. Fine for a single-server deployment, but horizontal scale requires PostgreSQL with connection pooling.
-
-### Production Enhancements
-
-1. **Vector Hybrid Memory (sqlite-vec / pgvector)**:
-   - Combine SQLite FTS5 BM25 with dense semantic vector embeddings. At query time, combine FTS5 lexical hits with cosine-similarity vector results in a hybrid ranker.
-
-2. **Adaptive Page Scraping**:
-   - For high-value pricing URLs detected in search results, dispatch a secondary headless fetch (or Tavily `extract` endpoint) to pull the full rendered page content, then pass it as additional context to the LLM for more accurate diff analysis.
-   - For high-value pricing URLs detected in search results, dispatch a secondary headless fetch (or Tavily `extract` endpoint) to pull the full rendered page content, then pass it as additional context to the LLM for more accurate diff analysis.
-
-4. **Rate-Limit Backoff & Circuit Breaker**:
-   - Add exponential backoff with jitter on Tavily 429 responses.
-   - Implement a circuit breaker pattern: after N consecutive failures to a provider, skip it for M seconds and return cached/stale results with a staleness warning.
-
-5. **Persistent Session Management**:
-   - Add a `sessions` table with metadata (created_at, last_active, title, tags).
-   - Support session branching: "Continue the CRM discussion from Monday in a new thread."
-
-6. **PostgreSQL Migration for Multi-Instance**:
-   - Replace SQLite with PostgreSQL + `pgvector` for production horizontal scaling.
-   - Use connection pooling (e.g., `pg-pool`) and read replicas for history queries.
-
+## Production Next Steps
+1. **Vector Hybrid Search**: FTS5 BM25 misses conceptual synonyms ("cloud database" vs "managed Postgres").
+   - *First step:* Add `sqlite-vec` embeddings with `text-embedding-004` and blend scores via Reciprocal Rank Fusion.
+2. **Targeted Page Extraction**: Search snippets often miss pricing tables hidden in deep documentation.
+   - *First step:* Call Tavily `/extract` on the top 2 ranked URLs when snippet confidence is low.
+3. **PostgreSQL Migration**: SQLite lacks multi-instance concurrency.
+   - *First step:* Swap `better-sqlite3` for `pg` pool with schema migrations to support multi-container deployments.
