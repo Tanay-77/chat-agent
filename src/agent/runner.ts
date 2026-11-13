@@ -7,7 +7,12 @@ import {
   getRecentMessages,
   Message
 } from '../db/memory.js';
-import { resolveTemporalContext } from '../context/temporalResolver.js';
+import {
+  resolveTemporalContext,
+  MAX_CONTEXT_CHARS,
+  formatDateInTz,
+  getUserTimezone
+} from '../context/temporalResolver.js';
 import {
   webSearchToolDeclaration,
   executeWebSearch,
@@ -36,29 +41,43 @@ export interface AgentEvent {
 export type AgentEventCallback = (event: AgentEvent) => void;
 
 /**
- * Builds a 14-day relative calendar mapping from the perspective of `now`.
+ * Builds a 14-day relative calendar mapping from the perspective of `now` in the user's timezone.
  */
-export function buildCalendarReference(now: Date = new Date()): string {
+export function buildCalendarReference(now: Date = new Date(), tz: string = 'UTC'): string {
   const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
   const lines: string[] = [];
-  const currentDayName = dayNames[now.getDay()];
-  const currentMonthName = monthNames[now.getMonth()];
-  const currentDateStr = now.toISOString().slice(0, 10);
-  const currentTimeStr = now.toISOString().slice(11, 16);
+  const currentDateStr = formatDateInTz(now, tz);
+  const [yNum, mNum, dNum] = currentDateStr.split('-').map(Number);
+  const localMid = new Date(Date.UTC(yNum, mNum - 1, dNum));
+  const currentDayName = dayNames[localMid.getUTCDay()];
+  const currentMonthName = monthNames[mNum - 1];
 
-  lines.push(`TODAY: ${currentDayName}, ${currentMonthName} ${now.getDate()}, ${now.getFullYear()} (${currentDateStr} ${currentTimeStr} UTC)`);
-  lines.push('RELATIVE CALENDAR MAPPING (Past 14 Days Reference):');
+  let timeStr = '12:00';
+  try {
+    timeStr = new Intl.DateTimeFormat('en-GB', {
+      timeZone: tz,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    }).format(now);
+  } catch {
+    timeStr = now.toISOString().slice(11, 16);
+  }
+
+  lines.push(`TODAY: ${currentDayName}, ${currentMonthName} ${dNum}, ${yNum} (${currentDateStr} ${timeStr} ${tz})`);
+  lines.push(`RELATIVE CALENDAR MAPPING (Past 14 Days Reference in ${tz}):`);
 
   for (let i = 0; i <= 14; i++) {
-    const d = new Date(now);
-    d.setDate(now.getDate() - i);
-    const dayName = dayNames[d.getDay()];
-    const mName = monthNames[d.getMonth()];
+    const d = new Date(localMid);
+    d.setUTCDate(localMid.getUTCDate() - i);
     const dateStr = d.toISOString().slice(0, 10);
+    const dayName = dayNames[d.getUTCDay()];
+    const mName = monthNames[d.getUTCMonth()];
+    const dayVal = d.getUTCDate();
     const label = i === 0 ? '[TODAY]' : i === 1 ? '[YESTERDAY]' : `[${i} days ago]`;
-    lines.push(`- ${dateStr} (${dayName}, ${mName} ${d.getDate()}) ${label}`);
+    lines.push(`- ${dateStr} (${dayName}, ${mName} ${dayVal}) ${label}`);
   }
 
   return lines.join('\n');
@@ -67,8 +86,8 @@ export function buildCalendarReference(now: Date = new Date()): string {
 /**
  * Constructs the system prompt with calendar anchors, retrieved historical memory, and operational rules.
  */
-export function buildSystemPrompt(now: Date, pastContext: string): string {
-  const calendarRef = buildCalendarReference(now);
+export function buildSystemPrompt(now: Date, pastContext: string, tz: string = 'UTC'): string {
+  const calendarRef = buildCalendarReference(now, tz);
 
   return `You are an elite, high-performance Chat Agent with temporal reasoning and live web verification capabilities.
 
@@ -91,7 +110,7 @@ ${pastContext || 'No relevant past cross-session conversation memory detected.'}
 3. TEMPORAL DIFF & COMPARISON:
    - When checking changes since Date X, perform an explicit TEMPORAL DIFF:
      * Baseline: What was stated or shortlisted in the historical conversation on that date.
-     * Current Live Reality: What live web results show as of today (${now.toISOString().slice(0, 10)}).
+     * Current Live Reality: What live web results show as of today (${formatDateInTz(now, tz)}).
      * Diff Analysis: Explicitly detail what changed (price increases/decreases, new tiers, limits) and what remains identical.
      * Be precise with numbers, tiers, and specs.
 
@@ -100,11 +119,14 @@ ${pastContext || 'No relevant past cross-session conversation memory detected.'}
    - Be direct, concise, and structured. Avoid lengthy conversational filler or generic preambles.
    - For comparisons, prioritize compact Markdown tables and high-density bullet points so the user gets facts immediately.
 
-5. STRICT ANTI-FABRICATION RULE (NO CONVERSATION HALLUCINATION):
+5. STRICT ANTI-FABRICATION RULE & AMBIGUOUS DATE RESOLUTION:
    - If the user refers to a past conversation, prior discussion, shortlist, question, or specific date (e.g., "what did I ask on 3 November?", "on Monday we shortlisted...", "last Tuesday I asked you about..."), and the HISTORICAL CONVERSATION MEMORY section above is empty or does NOT contain any matching record of that conversation:
      * You MUST explicitly state that you have no record of that prior conversation or question for that date/topic.
      * Ask the user to share the details or provide context.
      * You must NEVER invent, assume, simulate, or fabricate prior conversation content, previous questions, or past shortlists.
+   - If a date reference is ambiguous (e.g. numeric "11/3" which could be 11 March in DD/MM or 3 November in MM/DD):
+     * Explicitly state the ambiguity and identify which interpretation you used (e.g. "Interpreted '11/3' as day/month for your timezone").
+     * If no records exist for that date under that interpretation, explicitly state that you have no record for that date rather than guessing.
 
 6. ABSENCE OF RESULTS IS NOT EVIDENCE OF NO CHANGE:
    - Absence of results is not evidence of no change.
@@ -115,6 +137,7 @@ ${pastContext || 'No relevant past cross-session conversation memory detected.'}
 export interface RunAgentOptions {
   forceSequentialSearch?: boolean;
   thinkingBudget?: number;
+  timezone?: string;
 }
 
 /**
@@ -143,14 +166,15 @@ export async function runAgent(
   }
 
   const modelName = process.env.MODEL_NAME || 'gemini-3.1-flash-lite';
+  const effectiveTz = options.timezone || getUserTimezone(sessionId) || 'UTC';
   const now = refDate;
   const isoNow = now.toISOString();
 
-  // 1. Save incoming user message to SQLite
-  insertMessage(sessionId, 'user', userMessage, isoNow);
+  // 1. Save incoming user message to SQLite (computing date_str in user timezone)
+  insertMessage(sessionId, 'user', userMessage, isoNow, null, false, effectiveTz);
 
   // 2. Pre-Retrieval Context Resolution (before LLM call)
-  const temporalRes = resolveTemporalContext(userMessage, sessionId, now);
+  const temporalRes = resolveTemporalContext(userMessage, sessionId, now, MAX_CONTEXT_CHARS, effectiveTz);
   if (temporalRes.matchedMessages.length > 0) {
     const datesDesc = temporalRes.detectedDates.length > 0
       ? temporalRes.detectedDates.join(', ')
@@ -161,8 +185,8 @@ export async function runAgent(
     });
   }
 
-  // 3. Assemble System Prompt & Conversation History
-  const systemPrompt = buildSystemPrompt(now, temporalRes.formattedContext);
+  // 3. Assemble System Prompt & Conversation History in user timezone
+  const systemPrompt = buildSystemPrompt(now, temporalRes.formattedContext, effectiveTz);
 
   // Fetch recent messages for active session context (last 10 turns)
   const recentTurns = getRecentMessages(sessionId, 10);
@@ -354,8 +378,8 @@ export async function runAgent(
       onEvent({ type: 'token', content: finalAnswer });
     }
 
-    // 4. Save final assistant response to SQLite
-    insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString());
+    // 4. Save final assistant response to SQLite (computing date_str in user timezone)
+    insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz);
     onEvent({ type: 'done' });
     return finalAnswer;
 

@@ -19,6 +19,7 @@ import {
 } from './db/memory.js';
 import { runAgent, AgentEvent } from './agent/runner.js';
 import { clearSearchCache } from './tools/webSearch.js';
+import { setUserTimezone } from './context/temporalResolver.js';
 import { buildClient } from './client/build.js';
 
 const app = express();
@@ -82,6 +83,12 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     req.body?.forceSequentialSearch || req.query?.forceSequentialSearch === 'true'
   );
 
+  // Accept and store IANA timezone from client
+  const clientTimezone = typeof req.body?.timezone === 'string' ? req.body.timezone : undefined;
+  if (clientTimezone) {
+    setUserTimezone(sessionId, clientTimezone);
+  }
+
   const rawThinkingBudget = req.body?.thinkingBudget ?? req.query?.thinkingBudget;
   const thinkingBudget = typeof rawThinkingBudget === 'number'
     ? rawThinkingBudget
@@ -112,7 +119,8 @@ app.post('/api/chat', async (req: Request, res: Response) => {
   try {
     await runAgent(message.trim(), sessionId, sendEvent, new Date(), {
       forceSequentialSearch,
-      thinkingBudget
+      thinkingBudget,
+      timezone: clientTimezone
     });
   } catch (error: any) {
     console.error('[SSE Server Error]:', error);

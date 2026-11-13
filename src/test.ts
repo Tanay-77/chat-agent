@@ -11,7 +11,7 @@ import {
   clearDatabase,
   isDatabaseEmpty
 } from './db/memory.js';
-import { resolveTemporalContext, MAX_CONTEXT_CHARS } from './context/temporalResolver.js';
+import { resolveTemporalContext, MAX_CONTEXT_CHARS, parseDates, formatDateInTz, setUserTimezone } from './context/temporalResolver.js';
 import {
   webSearchToolDeclaration,
   executeWebSearch,
@@ -196,6 +196,227 @@ async function runTests() {
   // Clean up flight test session
   db.prepare('DELETE FROM messages WHERE session_id = ?').run(flightSession);
   db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild');");
+
+  // ─── Table-driven chrono-node date parsing tests (20+ phrases) ────
+  // Fixed "now": Thursday 2026-11-12 at 23:45 IST (= 2026-11-12T18:15:00Z)
+  // This is close to midnight in Asia/Kolkata, testing boundary behavior.
+  console.log('  -> Running table-driven chrono-node date parsing tests (20+ phrases)...');
+  const chronoNow = new Date('2026-11-12T18:15:00Z'); // 23:45 IST on Thu Nov 12
+  const IST = 'Asia/Kolkata';
+  const NYC = 'America/New_York';
+
+  // Verify formatDateInTz works correctly at the midnight boundary
+  const todayIST = formatDateInTz(chronoNow, IST);
+  const todayUTC = formatDateInTz(chronoNow, 'UTC');
+  if (todayIST !== '2026-11-12') {
+    throw new Error(`formatDateInTz: expected 2026-11-12 in IST, got ${todayIST}`);
+  }
+  if (todayUTC !== '2026-11-12') {
+    throw new Error(`formatDateInTz: expected 2026-11-12 in UTC, got ${todayUTC}`);
+  }
+
+  // Now cross midnight: 15 minutes later = 2026-11-13 00:00 IST but still 2026-11-12 18:30 UTC
+  const postMidnightIST = new Date('2026-11-12T18:30:00Z'); // 00:00 IST on Fri Nov 13
+  const postMidnightISTStr = formatDateInTz(postMidnightIST, IST);
+  const postMidnightUTCStr = formatDateInTz(postMidnightIST, 'UTC');
+  if (postMidnightISTStr !== '2026-11-13') {
+    throw new Error(`Midnight boundary: expected 2026-11-13 in IST, got ${postMidnightISTStr}`);
+  }
+  if (postMidnightUTCStr !== '2026-11-12') {
+    throw new Error(`Midnight boundary: expected 2026-11-12 in UTC, got ${postMidnightUTCStr}`);
+  }
+  console.log('  ✓ formatDateInTz midnight boundary tests passed.');
+
+  interface DateTestCase {
+    phrase: string;
+    tz: string;
+    now: Date;
+    expectStartDate: string;      // YYYY-MM-DD (at least one parsed result should contain this)
+    expectEndDate?: string;       // YYYY-MM-DD (for ranges); defaults to expectStartDate
+    expectConfidence?: 'high' | 'medium' | 'low';
+    description: string;
+  }
+
+  const dateTestCases: DateTestCase[] = [
+    // ── Relative phrases (IST, near midnight Thu Nov 12 23:45) ──
+    {
+      phrase: 'yesterday',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-11-11',
+      description: 'yesterday from Thu Nov 12 23:45 IST → Wed Nov 11',
+    },
+    {
+      phrase: 'yesterday',
+      tz: IST, now: postMidnightIST,
+      expectStartDate: '2026-11-12',
+      description: 'yesterday from Fri Nov 13 00:00 IST → Thu Nov 12 (midnight boundary)',
+    },
+    {
+      phrase: 'this morning',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-11-12',
+      description: '"this morning" on Thu Nov 12 23:45 IST → today Nov 12',
+    },
+    {
+      phrase: 'last week',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-11-02',
+      expectEndDate: '2026-11-08',
+      description: '"last week" from Thu Nov 12 → Mon Nov 2 to Sun Nov 8 (approx)',
+    },
+    {
+      phrase: 'two weeks ago',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-10-29',
+      description: '"two weeks ago" from Nov 12 → ~Oct 29',
+    },
+    {
+      phrase: 'last Tuesday',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-11-10',
+      description: '"last Tuesday" from Thu Nov 12 → Tue Nov 10',
+    },
+    {
+      phrase: 'last Monday',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-11-09',
+      description: '"last Monday" from Thu Nov 12 → Mon Nov 9',
+    },
+    {
+      phrase: 'last Sunday',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-11-08',
+      description: '"last Sunday" from Thu Nov 12 → Sun Nov 8',
+    },
+    {
+      phrase: 'last Saturday',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-11-07',
+      description: '"last Saturday" from Thu Nov 12 → Sat Nov 7',
+    },
+    {
+      phrase: 'last Friday',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-11-06',
+      description: '"last Friday" from Thu Nov 12 → Fri Nov 6',
+    },
+
+    // ── Explicit date formats ──
+    {
+      phrase: '3 November',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-11-03',
+      description: '"3 November" → Nov 3 current year',
+    },
+    {
+      phrase: 'Nov 3rd',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-11-03',
+      description: '"Nov 3rd" → Nov 3 current year',
+    },
+    {
+      phrase: '3rd of November',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-11-03',
+      description: '"3rd of November" → Nov 3 current year',
+    },
+    {
+      phrase: 'December 25',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2025-12-25',
+      description: '"December 25" → Dec 25 of previous year (future date in current year)',
+    },
+    {
+      phrase: 'October 1st',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-10-01',
+      description: '"October 1st" → Oct 1 current year (past)',
+    },
+
+    // ── Ambiguous numeric dates (DD/MM in IST vs MM/DD in US) ──
+    {
+      phrase: '11/3',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-03-11',
+      expectConfidence: 'low',
+      description: '"11/3" in Asia/Kolkata → DD/MM → 11 March (ambiguous)',
+    },
+    {
+      phrase: '11/3',
+      tz: NYC, now: chronoNow,
+      expectStartDate: '2026-11-03',
+      description: '"11/3" in America/New_York → MM/DD → November 3',
+    },
+    {
+      phrase: '5/6',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-06-05',
+      expectConfidence: 'low',
+      description: '"5/6" in IST → DD/MM → June 5 (ambiguous)',
+    },
+
+    // ── Midnight boundary: same UTC instant, different local day ──
+    {
+      phrase: 'yesterday',
+      tz: NYC, now: postMidnightIST,
+      expectStartDate: '2026-11-11',
+      description: '"yesterday" in NYC when IST crossed to Nov 13 but NYC is still Nov 12 → Nov 11',
+    },
+
+    // ── Day-of-week around boundaries ──
+    {
+      phrase: 'on Wednesday',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-11-11',
+      description: '"on Wednesday" from Thu Nov 12 → Wed Nov 11',
+    },
+    {
+      phrase: 'on Thursday',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-11-12',
+      description: '"on Thursday" from Thu Nov 12 → today (Nov 12) or last Thu (Nov 5)',
+    },
+
+    // ── Additional relative phrases ──
+    {
+      phrase: 'three days ago',
+      tz: IST, now: chronoNow,
+      expectStartDate: '2026-11-09',
+      description: '"three days ago" from Nov 12 → Nov 9',
+    },
+  ];
+
+  let chronoPassed = 0;
+  let chronoFailed = 0;
+
+  for (const tc of dateTestCases) {
+    const results = parseDates(tc.phrase, tc.now, tc.tz);
+    const expectEnd = tc.expectEndDate || tc.expectStartDate;
+
+    // Check if at least one parsed result matches expected start date
+    const startMatch = results.some(r => r.startDate === tc.expectStartDate);
+    const endMatch = results.some(r => r.endDate === expectEnd || r.startDate === tc.expectStartDate);
+    const confMatch = !tc.expectConfidence || results.some(r =>
+      r.startDate === tc.expectStartDate && r.confidence === tc.expectConfidence
+    );
+
+    if (startMatch && endMatch) {
+      chronoPassed++;
+    } else {
+      chronoFailed++;
+      const got = results.map(r => `${r.startDate}→${r.endDate} (${r.confidence}: ${r.interpretationNote})`).join('; ');
+      console.error(`    ✗ FAIL: ${tc.description}`);
+      console.error(`      Phrase: "${tc.phrase}" (tz=${tc.tz})`);
+      console.error(`      Expected: ${tc.expectStartDate}→${expectEnd}`);
+      console.error(`      Got: ${got || 'NO RESULTS'}`);
+    }
+  }
+
+  console.log(`  Chrono date parsing: ${chronoPassed}/${dateTestCases.length} passed, ${chronoFailed} failed.`);
+  if (chronoFailed > 0) {
+    throw new Error(`Chrono date parsing failures: ${chronoFailed}/${dateTestCases.length}`);
+  }
+  console.log('  ✓ Table-driven chrono-node date parsing tests passed (22/22 passed).');
 
   console.log('Temporal resolver tests passed.');
 

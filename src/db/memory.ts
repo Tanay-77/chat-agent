@@ -99,11 +99,30 @@ export function insertMessage(
   content: string,
   createdAt?: string,
   keywords?: string | null,
-  isDemo: boolean = false
+  isDemo: boolean = false,
+  timezone?: string
 ): Message {
   const finalCreatedAt = createdAt || new Date().toISOString();
-  // Extract YYYY-MM-DD from ISO string or date
-  const finalDateStr = finalCreatedAt.slice(0, 10);
+  // Compute YYYY-MM-DD in the user's timezone (not UTC)
+  let finalDateStr: string;
+  if (timezone) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      }).formatToParts(new Date(finalCreatedAt));
+      const y = parts.find(p => p.type === 'year')?.value;
+      const m = parts.find(p => p.type === 'month')?.value;
+      const d = parts.find(p => p.type === 'day')?.value;
+      finalDateStr = `${y}-${m}-${d}`;
+    } catch {
+      finalDateStr = finalCreatedAt.slice(0, 10);
+    }
+  } else {
+    finalDateStr = finalCreatedAt.slice(0, 10);
+  }
   const finalKeywords = keywords ? keywords.trim() : null;
   const isDemoVal = isDemo ? 1 : 0;
 

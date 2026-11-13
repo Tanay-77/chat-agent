@@ -46,7 +46,11 @@ export const App: React.FC = () => {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: trimmed, sessionId })
+        body: JSON.stringify({
+          message: trimmed,
+          sessionId,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+        })
       });
 
       if (!response.body) {
