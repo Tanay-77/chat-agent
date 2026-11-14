@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ChatMessage, HistoricalMessage, AgentTraceEvent } from './types.js';
+import { ChatMessage, HistoricalMessage, AgentTraceEvent, SessionSummary } from './types.js';
 import { Sidebar } from './components/Sidebar.js';
 import { ChatArea } from './components/ChatArea.js';
 import { InspectorModal } from './components/InspectorModal.js';
@@ -10,12 +10,52 @@ export const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [statusText, setStatusText] = useState('');
   const [timeline, setTimeline] = useState<Record<string, HistoricalMessage[]>>({});
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [inspectDate, setInspectDate] = useState<string | null>(null);
   const [inspectMessages, setInspectMessages] = useState<HistoricalMessage[]>([]);
   const [sessionId, setSessionId] = useState('eval-session-live');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   const toggleSidebar = () => setIsSidebarOpen((prev) => !prev);
+
+  const fetchSessions = async () => {
+    try {
+      const res = await fetch('/api/sessions');
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(Array.isArray(data) ? data : []);
+      }
+    } catch (err) {
+      console.error('Failed to load sessions from API:', err);
+    }
+  };
+
+  const handleSelectSession = async (selectedId: string) => {
+    if (isLoading) return;
+    try {
+      setIsLoading(true);
+      setStatusText('Loading chat history...');
+      const res = await fetch(`/api/sessions/${selectedId}/messages`);
+      if (res.ok) {
+        const data = await res.json();
+        const rawMsgs = Array.isArray(data) ? data : data.messages || [];
+        setMessages(
+          rawMsgs.map((m: any) => ({
+            role: m.role,
+            content: m.content
+          }))
+        );
+        setSessionId(selectedId);
+      } else if (res.status === 404) {
+        alert('Session not found or does not belong to you.');
+      }
+    } catch (err) {
+      console.error('Failed to load session messages:', err);
+    } finally {
+      setIsLoading(false);
+      setStatusText('');
+    }
+  };
 
   const handleNewChat = async () => {
     try {
@@ -31,7 +71,7 @@ export const App: React.FC = () => {
         setSessionId(newSessionId);
         setMessages([]);
         setInput('');
-        await fetchTimeline();
+        await Promise.all([fetchSessions(), fetchTimeline()]);
       } else {
         console.error('Failed to create new session');
       }
@@ -56,6 +96,7 @@ export const App: React.FC = () => {
   };
 
   useEffect(() => {
+    fetchSessions();
     fetchTimeline();
   }, []);
 
@@ -198,7 +239,7 @@ export const App: React.FC = () => {
     } finally {
       setIsLoading(false);
       setStatusText('');
-      fetchTimeline();
+      await Promise.all([fetchSessions(), fetchTimeline()]);
     }
   };
 
@@ -214,7 +255,7 @@ export const App: React.FC = () => {
       setIsLoading(true);
       await fetch('/api/reset', { method: 'POST' });
       setMessages([]);
-      await fetchTimeline();
+      await Promise.all([fetchSessions(), fetchTimeline()]);
     } catch (err: any) {
       alert(`Database reset error: ${err.message}`);
     } finally {
@@ -227,6 +268,9 @@ export const App: React.FC = () => {
       <Sidebar
         isOpen={isSidebarOpen}
         onToggleSidebar={toggleSidebar}
+        sessions={sessions}
+        currentSessionId={sessionId}
+        onSelectSession={handleSelectSession}
         timeline={timeline}
         onSelectDate={(date, msgs) => {
           setInspectDate(date);

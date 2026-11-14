@@ -300,7 +300,7 @@ export function resolveTemporalContext(
 
   const hasDateReference = allDetectedDates.length > 0 || parsedDates.length > 0;
   const hasExplicitChatReference =
-    /\b(we discussed|i asked|you said|we talked|we shortlisted|earlier conversation|earlier chat|previous discussion|you mentioned|as you said|as we discussed|did we discuss|did i ask|what did i ask|what did we decide)\b/i.test(userMessage);
+    /\b(we discussed|i asked|you said|we talked|we shortlisted|earlier conversation|earlier chat|previous discussion|you mentioned|as you said|as we discussed|did we discuss|did i ask|what did i ask|what did we decide|what did i say|what did i tell you|did i tell you|what did i mention|do you remember|remind me|what was my|what is my|what's my|who am i|my name|about me|do you know me)\b/i.test(userMessage);
 
   const hasTemporalReference = hasDateReference ||
     /\b(last|previous|yesterday|ago|since|earlier|before|shortlisted|asked you|this morning|this evening)\b/i.test(userMessage);
@@ -313,7 +313,7 @@ export function resolveTemporalContext(
     !/\b(we|i|my|our|you|discussed|shortlisted)\b/i.test(userMessage);
 
   // BM25 relevance threshold when no explicit date reference or conversational anchor exists
-  const BM25_RELEVANCE_THRESHOLD = -2.0;
+  const BM25_RELEVANCE_THRESHOLD = -0.0000001; // Negative score indicates genuine FTS5 BM25 match
 
   const messageMap = new Map<number, Message>();
 
@@ -360,8 +360,8 @@ export function resolveTemporalContext(
     }
 
     // 3. Fallback: conversational recall phrasing scoped to user_id
-    if (messageMap.size === 0 && (hasExplicitChatReference || /\b(asked you|we shortlisted|we discussed|shortlisted|remember)\b/i.test(userMessage))) {
-      const recent = getRecentMessages(null, 6, userId);
+    if (messageMap.size === 0 && (hasExplicitChatReference || /\b(asked you|we shortlisted|we discussed|shortlisted|remember|my name|who am i|know me)\b/i.test(userMessage))) {
+      const recent = getRecentMessages(null, 15, userId);
       for (const msg of recent) {
         messageMap.set(msg.id, { ...msg, rank: 0 });
       }

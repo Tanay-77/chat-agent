@@ -11,7 +11,9 @@ import {
   clearDatabase,
   isDatabaseEmpty,
   createSession,
-  getUserSessions
+  getUserSessions,
+  getUserSessionsWithSummary,
+  getSessionMessages
 } from './db/memory.js';
 import { resolveTemporalContext, MAX_CONTEXT_CHARS, parseDates, formatDateInTz, setUserTimezone } from './context/temporalResolver.js';
 import {
@@ -23,7 +25,7 @@ import {
 } from './tools/webSearch.js';
 import { FunctionCallingConfigMode } from '@google/genai';
 import { buildCalendarReference, buildSystemPrompt, runAgent, AgentEvent, classifyIntent } from './agent/runner.js';
-import { signCookieValue, unsignCookieValue, parseCookies, USER_COOKIE_NAME } from './index.js';
+import app, { signCookieValue, unsignCookieValue, parseCookies, USER_COOKIE_NAME } from './index.js';
 
 async function runTests() {
   console.log('=== Running Chat Agent Verification Suite ===\n');
@@ -1036,7 +1038,7 @@ async function runTests() {
   // ----------------------------------------------------
   // 10. New Chat & Cross-Session Memory Recall
   // ----------------------------------------------------
-  console.log('\n[10/10] Testing "New Chat" Session Creation & Cross-Session Memory Recall...');
+  console.log('\n[10/11] Testing "New Chat" Session Creation & Cross-Session Memory Recall...');
   const newChatUserId = 'user-newchat-eval-' + Date.now();
   clearDatabase(newChatUserId);
 
@@ -1107,6 +1109,49 @@ async function runTests() {
   }
   console.log('  ✓ Cross-session memory recall passed: Session B successfully retrieved Kyoto from Session A.');
 
+  // 4. Test User Name Recall Across Sessions (e.g. Chat 1: "My name is Tanay", Chat 2: "what is my name?")
+  console.log('  -> Testing name recall across sessions: "what is my name?"...');
+  const sessionName1 = createSession(newChatUserId, 'Name Session 1');
+  insertMessage(
+    sessionName1.id,
+    'user',
+    'My name is Tanay',
+    '2026-11-14T10:00:00Z',
+    null,
+    false,
+    'UTC',
+    newChatUserId
+  );
+  insertMessage(
+    sessionName1.id,
+    'assistant',
+    'Nice to meet you, Tanay!',
+    '2026-11-14T10:01:00Z',
+    null,
+    false,
+    'UTC',
+    newChatUserId
+  );
+
+  const sessionName2 = createSession(newChatUserId, 'Name Session 2');
+  const nameEvents: AgentEvent[] = [];
+  const nameAnswer = await runAgent(
+    'what is my name?',
+    sessionName2.id,
+    (ev) => nameEvents.push(ev),
+    policyNow,
+    { userId: newChatUserId }
+  );
+
+  if (!nameAnswer.toLowerCase().includes('tanay')) {
+    throw new Error(`Expected agent in new session to recall user name "Tanay", got: "${nameAnswer}"`);
+  }
+  const nameToolCalls = nameEvents.filter(ev => ev.type === 'tool_start');
+  if (nameToolCalls.length !== 0) {
+    throw new Error(`Expected 0 web searches for personal name recall, got ${nameToolCalls.length}`);
+  }
+  console.log('  ✓ User name cross-session recall verified: accurately recalled "Tanay" without web search.');
+
   // Clean up
   clearDatabase(newChatUserId);
   const clearedSessions = getUserSessions(newChatUserId);
@@ -1115,7 +1160,171 @@ async function runTests() {
   }
   console.log('  ✓ Clear all memory passed: wiped both messages and session rows.');
 
-  console.log('\nAll 10 test suites passed successfully!');
+  // ----------------------------------------------------
+  // 11. Chat History List & Endpoint Security (Sessions & 404 Isolation)
+  // ----------------------------------------------------
+  console.log('\n[11/11] Testing Chat History List & Endpoint Security (Sessions & 404 Isolation)...');
+  const userAlpha = 'user-hist-a-' + Date.now();
+  const userBeta = 'user-hist-b-' + Date.now();
+  clearDatabase(userAlpha);
+  clearDatabase(userBeta);
+
+  // Start ephemeral server to test real HTTP endpoints with signed cookies
+  const testServer = app.listen(0);
+  const testPort = (testServer.address() as any).port;
+  const baseUrl = `http://127.0.0.1:${testPort}`;
+
+  const alphaCookie = signCookieValue(userAlpha);
+  const betaCookie = signCookieValue(userBeta);
+
+  try {
+    // 1. User B creates a session and adds messages
+    const sessionB = createSession(userBeta, 'Bob Private Project');
+    insertMessage(
+      sessionB.id,
+      'user',
+      'Confidential details for project quantum ledger.',
+      '2026-11-14T08:00:00Z',
+      null,
+      false,
+      'UTC',
+      userBeta
+    );
+
+    // Verify User A direct query returns null
+    if (getSessionMessages(sessionB.id, userAlpha) !== null) {
+      throw new Error(`Security breach! getSessionMessages returned User B's session to User A!`);
+    }
+
+    // Verify User A via HTTP GET /api/sessions/:id/messages gets 404
+    const resA = await fetch(`${baseUrl}/api/sessions/${sessionB.id}/messages`, {
+      headers: {
+        Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(alphaCookie)}`
+      }
+    });
+    if (resA.status !== 404) {
+      throw new Error(`Security breach! Expected 404 when User A requests User B's session, got HTTP ${resA.status}`);
+    }
+    console.log('  ✓ User A cannot fetch User B\'s session: returns HTTP 404.');
+
+    // Verify User B can fetch their own session messages (HTTP 200)
+    const resB = await fetch(`${baseUrl}/api/sessions/${sessionB.id}/messages`, {
+      headers: {
+        Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(betaCookie)}`
+      }
+    });
+    if (resB.status !== 200) {
+      throw new Error(`Expected HTTP 200 for User B accessing own session, got HTTP ${resB.status}`);
+    }
+    const bMessages = await resB.json();
+    if (!Array.isArray(bMessages) || bMessages.length !== 1 || !bMessages[0].content.includes('quantum ledger')) {
+      throw new Error(`Unexpected session messages for User B: ${JSON.stringify(bMessages)}`);
+    }
+    console.log('  ✓ User B can successfully fetch own session messages.');
+
+    // 2. Test User A session listing and title truncation to 60 characters
+    // User A creates Session 1 with a message > 60 chars
+    const sessionA1 = createSession(userAlpha, 'Initial Title');
+    const longPrompt = 'Can you analyze the complete competitive breakdown of CRM software for enterprise teams?'; // 89 chars
+    insertMessage(
+      sessionA1.id,
+      'user',
+      longPrompt,
+      '2026-11-14T09:00:00Z',
+      null,
+      false,
+      'UTC',
+      userAlpha
+    );
+    insertMessage(
+      sessionA1.id,
+      'assistant',
+      'Here is the complete competitive CRM analysis...',
+      '2026-11-14T09:01:00Z',
+      null,
+      false,
+      'UTC',
+      userAlpha
+    );
+
+    // Fetch GET /api/sessions for User A
+    const listRes1 = await fetch(`${baseUrl}/api/sessions`, {
+      headers: {
+        Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(alphaCookie)}`
+      }
+    });
+    if (listRes1.status !== 200) {
+      throw new Error(`Failed to fetch sessions: HTTP ${listRes1.status}`);
+    }
+    const sessionsList1 = await listRes1.json();
+    if (!Array.isArray(sessionsList1) || sessionsList1.length !== 1) {
+      throw new Error(`Expected 1 session in list for User A, got ${sessionsList1.length}`);
+    }
+    const expectedTruncated = longPrompt.substring(0, 60);
+    if (sessionsList1[0].title !== expectedTruncated) {
+      throw new Error(
+        `Expected title to be first user message truncated to 60 chars ("${expectedTruncated}"), got: "${sessionsList1[0].title}"`
+      );
+    }
+    if (sessionsList1[0].title.length !== 60) {
+      throw new Error(`Expected title length to be exactly 60 chars, got ${sessionsList1[0].title.length}`);
+    }
+    console.log('  ✓ Session title accurately truncated to first user message (60 chars).');
+
+    // 3. Click "New chat": create Session 2
+    const newChatRes = await fetch(`${baseUrl}/api/session/new`, {
+      method: 'POST',
+      headers: {
+        Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(alphaCookie)}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    if (newChatRes.status !== 201) {
+      throw new Error(`Failed to create new session: HTTP ${newChatRes.status}`);
+    }
+    const newChatData = await newChatRes.json();
+    const sessionA2Id = newChatData.sessionId;
+
+    // After New chat, old session still appears in the list!
+    const listRes2 = await fetch(`${baseUrl}/api/sessions`, {
+      headers: {
+        Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(alphaCookie)}`
+      }
+    });
+    const sessionsList2 = await listRes2.json();
+    if (!Array.isArray(sessionsList2) || sessionsList2.length !== 2) {
+      throw new Error(`Expected both sessions to appear in list after New chat, got ${sessionsList2.length}`);
+    }
+    const sessionA1InList = sessionsList2.find((s: any) => s.id === sessionA1.id);
+    if (!sessionA1InList || sessionA1InList.title !== expectedTruncated) {
+      throw new Error(`Old session missing or corrupted in sessions list after New chat!`);
+    }
+    console.log('  ✓ After New chat, the old session still appears in the list with proper title.');
+
+    // 4. In Session 2, the agent can still recall Session 1's content
+    console.log('  -> Asking in new session: "What did I ask you to analyze in CRM earlier?"...');
+    const recallEvents: AgentEvent[] = [];
+    const recallAnswer = await runAgent(
+      'What did I ask you to analyze in CRM earlier?',
+      sessionA2Id,
+      (ev) => recallEvents.push(ev),
+      policyNow,
+      { userId: userAlpha }
+    );
+    const lowerRecall = recallAnswer.toLowerCase();
+    if (!lowerRecall.includes('competitive') && !lowerRecall.includes('crm')) {
+      throw new Error(`Expected agent in new session to recall earlier CRM inquiry from Session 1, got: "${recallAnswer}"`);
+    }
+    console.log('  ✓ Cross-session memory recall confirmed: Agent recalled Session 1 content in Session 2.');
+
+  } finally {
+    testServer.close();
+    clearDatabase(userAlpha);
+    clearDatabase(userBeta);
+  }
+  console.log('  ✓ Test server closed and database cleaned.');
+
+  console.log('\nAll 11 test suites passed successfully!');
 }
 
 runTests().catch((err) => {

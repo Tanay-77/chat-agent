@@ -31,3 +31,9 @@ export interface QuickTestPrompt {
   prompt: string;
 }
 
+export interface SessionSummary {
+  id: string;
+  title: string;
+  last_message_at: string;
+}
+

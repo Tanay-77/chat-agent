@@ -100,6 +100,7 @@ ${pastContext || 'No relevant past cross-session conversation memory detected.'}
 
 IMPORTANT NOTE ON RETRIEVED MEMORY:
 Retrieved past conversation is what the USER said or what the assistant claimed earlier. It is NOT a source of current facts. Never state a version, price, date or status from past conversation or from model memory. Current facts must come from this turn's search results only.
+However, user personal context and statements (e.g., the user's name, preferences, or stated details) MUST be recalled directly from what the user stated in the historical conversation memory above.
 
 === OPERATIONAL INSTRUCTIONS & RULES ===
 1. TEMPORAL ACCURACY & RESOLUTION:
@@ -210,14 +211,20 @@ export function classifyIntent(
     };
   }
 
-  // 2. RECALL: user is asking what they said or asked ("what did I tell you", "what did I ask", "do you remember").
+  // 2. RECALL: user is asking what they said or asked ("what did I tell you", "what did I ask", "do you remember")
+  // or asking to recall their identity, name, or personal stated attributes ("what is my name", "who am I").
   const recallPatterns = [
     /\bwhat\s+did\s+(i|we)\s+(tell\s+you|ask(\s+you)?|say|mention|shortlist|discuss|talk\s+about|decide)\b/i,
     /\bwhat\s+(was|were)\s+(the\s+|my\s+|our\s+)?(shortlist|question(s)?|discussion|options|recommendation(s)?)\b/i,
     /\bdo\s+you\s+remember\b/i,
     /\bdid\s+i\s+(tell\s+you|ask(\s+you)?|mention|say)\b/i,
     /\b(tell\s+me|remind\s+me)\s+what\s+(i|we)\s+(said|told\s+you|asked|discussed|talked\s+about)\b/i,
-    /\bwhat\s+did\s+i\s+tell\s+you\b/i
+    /\bwhat\s+did\s+i\s+tell\s+you\b/i,
+    /\b(what\s+is|what's)\s+my\s+(name|job|role|title|email|city|location|preference|plan|stack)\b/i,
+    /\bwho\s+am\s+i\b/i,
+    /\bdo\s+you\s+know\s+(my\s+name|who\s+i\s+am)\b/i,
+    /\b(tell\s+me|remind\s+me)\s+(my\s+name|who\s+i\s+am)\b/i,
+    /\bmy\s+name\b/i
   ];
 
   const isRecall = recallPatterns.some((pattern) => pattern.test(text));

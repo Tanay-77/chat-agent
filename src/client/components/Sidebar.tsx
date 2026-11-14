@@ -1,15 +1,45 @@
 import React from 'react';
-import { HistoricalMessage, QuickTestPrompt } from '../types.js';
+import { HistoricalMessage, QuickTestPrompt, SessionSummary } from '../types.js';
 
 interface SidebarProps {
   isOpen: boolean;
   onToggleSidebar: () => void;
+  sessions: SessionSummary[];
+  currentSessionId: string;
+  onSelectSession: (id: string) => void;
   timeline: Record<string, HistoricalMessage[]>;
   onSelectDate: (date: string, messages: HistoricalMessage[]) => void;
   onRunQuickTest: (prompt: string) => void;
   onNewChat: () => void;
   onResetDatabase: () => void;
   isLoading: boolean;
+}
+
+function formatRelativeTime(isoString?: string): string {
+  if (!isoString) return 'Recent';
+  try {
+    const date = new Date(isoString);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    if (diffMs < 0) return 'Just now';
+    const diffSecs = Math.floor(diffMs / 1000);
+    const diffMins = Math.floor(diffSecs / 60);
+    const diffHours = Math.floor(diffMins / 60);
+    const diffDays = Math.floor(diffHours / 24);
+
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays === 1) return 'Yesterday';
+    if (diffDays < 7) return `${diffDays}d ago`;
+
+    return date.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric'
+    });
+  } catch {
+    return 'Recent';
+  }
 }
 
 const QUICK_TESTS: QuickTestPrompt[] = [
@@ -36,6 +66,9 @@ const QUICK_TESTS: QuickTestPrompt[] = [
 export const Sidebar: React.FC<SidebarProps> = ({
   isOpen,
   onToggleSidebar,
+  sessions,
+  currentSessionId,
+  onSelectSession,
   timeline,
   onSelectDate,
   onRunQuickTest,
@@ -87,6 +120,35 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       <div className="sidebar-content">
+        {/* Chat History / Sessions Section */}
+        <section className="sidebar-section">
+          <div className="section-title">CHAT HISTORY</div>
+          <div className="sessions-list">
+            {sessions.length === 0 ? (
+              <div className="sessions-empty">No previous chats.</div>
+            ) : (
+              sessions.map((sess) => {
+                const isActive = sess.id === currentSessionId;
+                return (
+                  <button
+                    key={sess.id}
+                    type="button"
+                    className={`session-item ${isActive ? 'active' : ''}`}
+                    onClick={() => onSelectSession(sess.id)}
+                    disabled={isLoading}
+                    title={sess.title}
+                  >
+                    <div className="session-item-title">{sess.title}</div>
+                    <div className="session-item-meta">
+                      <span>{formatRelativeTime(sess.last_message_at)}</span>
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </section>
+
         {/* Quick-Test Prompts Section */}
         <section className="sidebar-section">
           <div className="section-title">EVALUATION BENCHMARKS</div>

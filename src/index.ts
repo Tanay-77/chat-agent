@@ -15,10 +15,13 @@ import {
   insertMessage,
   createSession,
   getUserSessions,
+  getUserSessionsWithSummary,
+  getSessionMessages,
   clearDatabase,
   MessageRole,
   Message,
   Session,
+  SessionSummary,
   db
 } from './db/memory.js';
 import { runAgent, AgentEvent } from './agent/runner.js';
@@ -251,11 +254,21 @@ app.post('/api/session/new', (req: Request, res: Response) => {
 
 app.get('/api/sessions', (req: Request, res: Response) => {
   try {
-    const sessions = getUserSessions(req.userId);
-    return res.json({
-      userId: req.userId,
-      sessions
-    });
+    const sessions = getUserSessionsWithSummary(req.userId);
+    return res.json(sessions);
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/sessions/:id/messages', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const messages = getSessionMessages(id, req.userId);
+    if (messages === null) {
+      return res.status(404).json({ error: 'Session not found or does not belong to this user' });
+    }
+    return res.json(messages);
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }

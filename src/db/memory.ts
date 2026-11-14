@@ -24,6 +24,12 @@ export interface Session {
   created_at: string;
 }
 
+export interface SessionSummary {
+  id: string;
+  title: string;
+  last_message_at: string;
+}
+
 // Ensure database directory exists
 const DB_DIR = path.resolve(process.cwd(), 'data');
 if (!fs.existsSync(DB_DIR)) {
@@ -437,6 +443,75 @@ export function getUserSessions(userId: string = 'default-user'): Session[] {
     ORDER BY created_at DESC
   `);
   return stmt.all(userId) as Session[];
+}
+
+/**
+ * Retrieves the session history list for a user, sorted newest first.
+ * Title is the first user message in that session truncated to 60 characters.
+ * Returns up to 50 items.
+ */
+export function getUserSessionsWithSummary(userId: string = 'default-user'): SessionSummary[] {
+  const stmt = db.prepare(`
+    WITH combined_sessions AS (
+      SELECT id, user_id, title, created_at FROM sessions WHERE user_id = ?
+      UNION ALL
+      SELECT session_id AS id, user_id, NULL AS title, MIN(created_at) AS created_at
+      FROM messages WHERE user_id = ?
+      GROUP BY session_id
+    ),
+    unique_sessions AS (
+      SELECT id, user_id, MAX(title) AS title, MIN(created_at) AS created_at
+      FROM combined_sessions
+      GROUP BY id
+    )
+    SELECT 
+      s.id,
+      COALESCE(
+        (
+          SELECT SUBSTR(m.content, 1, 60)
+          FROM messages m
+          WHERE m.user_id = s.user_id AND m.session_id = s.id AND m.role = 'user'
+          ORDER BY m.created_at ASC, m.id ASC
+          LIMIT 1
+        ),
+        s.title,
+        'New Chat'
+      ) AS title,
+      COALESCE(
+        (
+          SELECT MAX(m.created_at)
+          FROM messages m
+          WHERE m.user_id = s.user_id AND m.session_id = s.id
+        ),
+        s.created_at
+      ) AS last_message_at
+    FROM unique_sessions s
+    ORDER BY last_message_at DESC
+    LIMIT 50
+  `);
+
+  return stmt.all(userId, userId) as SessionSummary[];
+}
+
+/**
+ * Retrieves all messages for a session only if it belongs to the specified user.
+ * Returns null if the session does not belong to the user or does not exist.
+ */
+export function getSessionMessages(sessionId: string, userId: string = 'default-user'): Message[] | null {
+  const sessRow = db.prepare('SELECT 1 FROM sessions WHERE id = ? AND user_id = ? LIMIT 1').get(sessionId, userId);
+  const msgRow = !sessRow ? db.prepare('SELECT 1 FROM messages WHERE session_id = ? AND user_id = ? LIMIT 1').get(sessionId, userId) : true;
+
+  if (!sessRow && !msgRow) {
+    return null;
+  }
+
+  const stmt = db.prepare(`
+    SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo
+    FROM messages
+    WHERE session_id = ? AND user_id = ?
+    ORDER BY created_at ASC, id ASC
+  `);
+  return stmt.all(sessionId, userId) as Message[];
 }
 
 /**
