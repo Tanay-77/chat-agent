@@ -1,18 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { ChatMessage, HistoricalMessage, AgentTraceEvent, SessionSummary } from './types.js';
+import { ChatMessage, AgentTraceEvent, SessionSummary } from './types.js';
 import { Sidebar } from './components/Sidebar.js';
 import { ChatArea } from './components/ChatArea.js';
-import { InspectorModal } from './components/InspectorModal.js';
 
 export const App: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [statusText, setStatusText] = useState('');
-  const [timeline, setTimeline] = useState<Record<string, HistoricalMessage[]>>({});
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [inspectDate, setInspectDate] = useState<string | null>(null);
-  const [inspectMessages, setInspectMessages] = useState<HistoricalMessage[]>([]);
   const [sessionId, setSessionId] = useState('eval-session-live');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
@@ -71,7 +67,7 @@ export const App: React.FC = () => {
         setSessionId(newSessionId);
         setMessages([]);
         setInput('');
-        await Promise.all([fetchSessions(), fetchTimeline()]);
+        await fetchSessions();
       } else {
         console.error('Failed to create new session');
       }
@@ -83,21 +79,8 @@ export const App: React.FC = () => {
     }
   };
 
-  const fetchTimeline = async () => {
-    try {
-      const res = await fetch('/api/history');
-      if (res.ok) {
-        const data = await res.json();
-        setTimeline(data.groupedByDate || {});
-      }
-    } catch (err) {
-      console.error('Failed to load timeline from API:', err);
-    }
-  };
-
   useEffect(() => {
     fetchSessions();
-    fetchTimeline();
   }, []);
 
   const handleSendMessage = async (text: string) => {
@@ -239,23 +222,19 @@ export const App: React.FC = () => {
     } finally {
       setIsLoading(false);
       setStatusText('');
-      await Promise.all([fetchSessions(), fetchTimeline()]);
+      await fetchSessions();
     }
   };
 
   const handleResetDatabase = async () => {
-    if (
-      !window.confirm(
-        'Clear all conversation history and reset SQLite database to empty state?\n\nWARNING: This will permanently delete all past messages and memory across all sessions.'
-      )
-    ) {
+    if (!window.confirm('This deletes all your chat history and memory. Continue?')) {
       return;
     }
     try {
       setIsLoading(true);
       await fetch('/api/reset', { method: 'POST' });
       setMessages([]);
-      await Promise.all([fetchSessions(), fetchTimeline()]);
+      await fetchSessions();
     } catch (err: any) {
       alert(`Database reset error: ${err.message}`);
     } finally {
@@ -267,16 +246,9 @@ export const App: React.FC = () => {
     <div className="app-shell">
       <Sidebar
         isOpen={isSidebarOpen}
-        onToggleSidebar={toggleSidebar}
         sessions={sessions}
         currentSessionId={sessionId}
         onSelectSession={handleSelectSession}
-        timeline={timeline}
-        onSelectDate={(date, msgs) => {
-          setInspectDate(date);
-          setInspectMessages(msgs);
-        }}
-        onRunQuickTest={handleSendMessage}
         onNewChat={handleNewChat}
         onResetDatabase={handleResetDatabase}
         isLoading={isLoading}
@@ -289,16 +261,8 @@ export const App: React.FC = () => {
         onSendMessage={handleSendMessage}
         isLoading={isLoading}
         statusText={statusText}
-        sessionId={sessionId}
         isSidebarOpen={isSidebarOpen}
         onToggleSidebar={toggleSidebar}
-        onNewChat={handleNewChat}
-      />
-
-      <InspectorModal
-        date={inspectDate}
-        messages={inspectMessages}
-        onClose={() => setInspectDate(null)}
       />
     </div>
   );

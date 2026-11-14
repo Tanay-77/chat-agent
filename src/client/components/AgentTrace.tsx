@@ -19,11 +19,12 @@ export const AgentTrace: React.FC<AgentTraceProps> = ({ trace }) => {
   const totalResults = toolEnds.reduce((acc, curr) => acc + (curr.resultCount || 0), 0);
   const totalDurationMs = toolEnds.reduce((acc, curr) => acc + (curr.durationMs || 0), 0);
 
-  let pillTitle = 'Agent Trace';
+  let pillTitle = 'Used earlier conversation';
   if (totalQueries > 0) {
-    pillTitle = `Trace: ${totalQueries} parallel queries · ${totalResults} results · ${totalDurationMs}ms`;
+    const durationSec = (totalDurationMs / 1000).toFixed(1);
+    pillTitle = `Searched the web · ${totalResults} results · ${durationSec}s`;
   } else if (statusEvents.length > 0) {
-    pillTitle = 'Trace: Historical memory pre-retrieved';
+    pillTitle = 'Used earlier conversation';
   }
 
   return (

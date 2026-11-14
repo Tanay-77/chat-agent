@@ -10,10 +10,8 @@ interface ChatAreaProps {
   onSendMessage: (text: string) => void;
   isLoading: boolean;
   statusText: string;
-  sessionId: string;
   isSidebarOpen: boolean;
   onToggleSidebar: () => void;
-  onNewChat: () => void;
 }
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
@@ -23,10 +21,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onSendMessage,
   isLoading,
   statusText,
-  sessionId,
   isSidebarOpen,
-  onToggleSidebar,
-  onNewChat
+  onToggleSidebar
 }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -66,26 +62,6 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             </svg>
             <span>{isSidebarOpen ? 'Hide sidebar' : 'Open sidebar'}</span>
           </button>
-          <button
-            type="button"
-            className="navbar-new-chat-btn"
-            onClick={onNewChat}
-            disabled={isLoading}
-            title="Start a new chat session"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-            <span>New Chat</span>
-          </button>
-          <div className="navbar-session">
-            <span className="session-tag">SESSION ID</span>
-            <span className="session-id">{sessionId}</span>
-          </div>
-        </div>
-        <div className="navbar-stats">
-          <span>{messages.filter((m) => m.role === 'user').length} queries</span>
         </div>
       </header>
 
@@ -93,10 +69,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         {messages.length === 0 && !isLoading && (
           <div className="chat-empty-state">
             <div className="empty-icon">⚡</div>
-            <h3>Temporal Chat Agent Ready</h3>
+            <h3>Chat Agent Ready</h3>
             <p>
-              Select any benchmark prompt in the sidebar to test cross-session historical recall and
-              batched live web search verification.
+              Ask questions with cross-session memory recall and live web search verification.
             </p>
           </div>
         )}
@@ -149,7 +124,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <textarea
             ref={textareaRef}
             className="chat-textarea"
-            placeholder="Ask a temporal cross-session query or pricing verification..."
+            placeholder="Ask anything…"
             value={input}
             onChange={handleTextareaChange}
             onKeyDown={handleKeyDown}

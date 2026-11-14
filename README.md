@@ -46,6 +46,19 @@ A high-performance chat agent in TypeScript on Node.js featuring persistent SQLi
 
 ---
 
+## Example prompts
+
+1. **Evaluation Prompt 1 · CRM Shortlist**:
+   > "On Monday we shortlisted 5 CRM tools for a 20-person sales team. Has any of them changed pricing or shipped something big since?"
+
+2. **Evaluation Prompt 2 · 3 November Versions**:
+   > "What did I ask you on 3 November? Is your answer still correct today?"
+
+3. **Evaluation Prompt 3 · Postgres Hosting**:
+   > "Last Tuesday I asked you about Postgres hosting. Has any pricing changed since then?"
+
+---
+
 ## Quick Start
 
 ### 1. Install Dependencies

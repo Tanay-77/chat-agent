@@ -656,9 +656,23 @@ export async function runAgent(
 
   } catch (error: any) {
     console.error('[Agent Runner Error]:', error);
-    const errorMsg = error?.message || 'Unknown agent execution error';
+    let errorMsg = error?.message || 'Unknown agent execution error';
+    if (error?.message === 'fetch failed' || error?.name === 'TypeError') {
+      const cause = error?.cause;
+      const causeCode = cause?.code;
+      if (causeCode === 'ENOTFOUND') {
+        errorMsg = `Unable to reach Gemini API (DNS lookup failed for ${cause?.hostname || 'generativelanguage.googleapis.com'}). Please check your internet connection or proxy.`;
+      } else if (causeCode === 'ECONNREFUSED') {
+        errorMsg = `Unable to reach Gemini API (Connection refused). Please check your firewall or proxy settings.`;
+      } else if (causeCode === 'ETIMEDOUT') {
+        errorMsg = `Connection to Gemini API timed out. Please check your internet connection.`;
+      } else if (cause?.message) {
+        errorMsg = `Network connection failed: ${cause.message}. Please check your internet connection.`;
+      } else {
+        errorMsg = `Network request failed (fetch failed). Please check your internet connection.`;
+      }
+    }
     onEvent({ type: 'error', error: errorMsg });
-    onEvent({ type: 'token', content: `\n[Agent Error: ${errorMsg}]` });
     onEvent({ type: 'done' });
     return errorMsg;
   }
