@@ -8,6 +8,7 @@ interface ChatAreaProps {
   input: string;
   setInput: (value: string) => void;
   onSendMessage: (text: string) => void;
+  onStopExecution?: () => void;
   isLoading: boolean;
   statusText: string;
   isSidebarOpen: boolean;
@@ -19,6 +20,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   input,
   setInput,
   onSendMessage,
+  onStopExecution,
   isLoading,
   statusText,
   isSidebarOpen,
@@ -34,7 +36,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      onSendMessage(input);
+      if (!isLoading) {
+        onSendMessage(input);
+      }
     }
   };
 
@@ -118,7 +122,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           className="chat-form"
           onSubmit={(e) => {
             e.preventDefault();
-            onSendMessage(input);
+            if (isLoading) {
+              onStopExecution?.();
+            } else {
+              onSendMessage(input);
+            }
           }}
         >
           <textarea
@@ -131,13 +139,24 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             rows={1}
             disabled={isLoading}
           />
-          <button
-            type="submit"
-            className="send-button"
-            disabled={isLoading || !input.trim()}
-          >
-            {isLoading ? 'Running...' : 'Send'}
-          </button>
+          {isLoading ? (
+            <button
+              type="button"
+              className="stop-button"
+              onClick={onStopExecution}
+              title="Stop execution"
+            >
+              ■ Stop
+            </button>
+          ) : (
+            <button
+              type="submit"
+              className="send-button"
+              disabled={!input.trim()}
+            >
+              Send
+            </button>
+          )}
         </form>
       </footer>
     </main>

@@ -1317,6 +1317,43 @@ async function runTests() {
     }
     console.log('  ✓ Cross-session memory recall confirmed: Agent recalled Session 1 content in Session 2.');
 
+    // 12. Testing Stop Execution & AbortSignal Handling
+    console.log('\n[12/12] Testing Stop Execution & AbortSignal Handling...');
+    const stopAbortController = new AbortController();
+    stopAbortController.abort(); // already aborted
+    const stopEvents: AgentEvent[] = [];
+    const stopStart = performance.now();
+    const stoppedResult = await runAgent(
+      'What is the latest pricing for CRM tools?',
+      'session-stop-test',
+      (ev) => stopEvents.push(ev),
+      policyNow,
+      { signal: stopAbortController.signal, userId: userAlpha }
+    );
+    const stopDuration = performance.now() - stopStart;
+    if (stopDuration > 500) {
+      throw new Error(`Expected aborted agent execution to exit immediately, took ${stopDuration}ms`);
+    }
+    if (stopEvents.some((e) => e.type === 'error')) {
+      throw new Error('Aborted execution should not emit error events');
+    }
+    console.log(`  ✓ Stop execution verified: runAgent stopped cleanly in ${Math.round(stopDuration)}ms with AbortSignal.`);
+
+    // Test POST /api/chat/stop endpoint
+    const stopRes = await fetch(`${baseUrl}/api/chat/stop`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(alphaCookie)}`
+      },
+      body: JSON.stringify({ sessionId: 'session-nonexistent' })
+    });
+    const stopData = await stopRes.json();
+    if (!stopData.success) {
+      throw new Error('POST /api/chat/stop should return success');
+    }
+    console.log('  ✓ POST /api/chat/stop endpoint verified.');
+
   } finally {
     testServer.close();
     clearDatabase(userAlpha);
@@ -1324,7 +1361,7 @@ async function runTests() {
   }
   console.log('  ✓ Test server closed and database cleaned.');
 
-  console.log('\nAll 11 test suites passed successfully!');
+  console.log('\nAll 12 test suites passed successfully!');
 }
 
 runTests().catch((err) => {

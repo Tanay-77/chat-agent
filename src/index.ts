@@ -174,6 +174,8 @@ app.get('/', (_req: Request, res: Response) => {
 // POST /api/chat (Server-Sent Events Streaming)
 // ----------------------------------------------------
 
+const activeChatAbortControllers = new Map<string, AbortController>();
+
 app.post('/api/chat', async (req: Request, res: Response) => {
   const { message, sessionId = 'default-session' } = req.body;
   const forceSequentialSearch = Boolean(
@@ -204,9 +206,15 @@ app.post('/api/chat', async (req: Request, res: Response) => {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
+  const abortController = new AbortController();
+  const chatKey = `${req.userId}:${sessionId}`;
+  activeChatAbortControllers.set(chatKey, abortController);
+
   let isClosed = false;
   res.on('close', () => {
     isClosed = true;
+    abortController.abort();
+    activeChatAbortControllers.delete(chatKey);
   });
 
   const sendEvent = (event: AgentEvent) => {
@@ -219,18 +227,36 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       forceSequentialSearch,
       thinkingBudget,
       timezone: clientTimezone,
-      userId: req.userId
+      userId: req.userId,
+      signal: abortController.signal
     });
   } catch (error: any) {
     console.error('[SSE Server Error]:', error);
     sendEvent({ type: 'error', error: error?.message || 'Unexpected server error' });
     sendEvent({ type: 'done' });
   } finally {
+    activeChatAbortControllers.delete(chatKey);
     if (!res.writableEnded && !res.destroyed) {
       res.write('data: [DONE]\n\n');
       res.end();
     }
   }
+});
+
+// ----------------------------------------------------
+// POST /api/chat/stop (Stop/Abort Active Execution)
+// ----------------------------------------------------
+
+app.post('/api/chat/stop', (req: Request, res: Response) => {
+  const { sessionId = 'default-session' } = req.body;
+  const chatKey = `${req.userId}:${sessionId}`;
+  const controller = activeChatAbortControllers.get(chatKey);
+  if (controller) {
+    controller.abort();
+    activeChatAbortControllers.delete(chatKey);
+    return res.json({ success: true, stopped: true });
+  }
+  return res.json({ success: true, stopped: false });
 });
 
 // ----------------------------------------------------

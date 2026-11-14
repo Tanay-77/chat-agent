@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { ChatMessage, AgentTraceEvent, SessionSummary } from './types.js';
 import { Sidebar } from './components/Sidebar.js';
 import { ChatArea } from './components/ChatArea.js';
@@ -11,6 +11,8 @@ export const App: React.FC = () => {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionId, setSessionId] = useState('eval-session-live');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const toggleSidebar = () => setIsSidebarOpen((prev) => !prev);
 
@@ -94,11 +96,14 @@ export const App: React.FC = () => {
 
     const currentTrace: AgentTraceEvent[] = [];
     let assistantText = '';
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           message: trimmed,
           sessionId,
@@ -211,19 +216,55 @@ export const App: React.FC = () => {
         }
       }
     } catch (err: any) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          content: `**Execution Error:** ${err?.message || 'Connection failure'}`,
-          trace: currentTrace
-        }
-      ]);
+      if (err.name === 'AbortError') {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last && last.role === 'assistant') {
+            const { _streaming, ...clean } = last;
+            const content = clean.content
+              ? `${clean.content}\n\n*[Execution stopped]*`
+              : '*[Execution stopped]*';
+            return [...prev.slice(0, -1), { ...clean, content, trace: [...currentTrace] }];
+          }
+          return [
+            ...prev,
+            {
+              role: 'assistant',
+              content: '*[Execution stopped]*',
+              trace: currentTrace
+            }
+          ];
+        });
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: `**Execution Error:** ${err?.message || 'Connection failure'}`,
+            trace: currentTrace
+          }
+        ]);
+      }
     } finally {
       setIsLoading(false);
       setStatusText('');
+      abortControllerRef.current = null;
       await fetchSessions();
     }
+  };
+
+  const handleStopExecution = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    fetch('/api/chat/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId })
+    }).catch(() => {});
+    setIsLoading(false);
+    setStatusText('');
   };
 
   const handleResetDatabase = async () => {
@@ -259,6 +300,7 @@ export const App: React.FC = () => {
         input={input}
         setInput={setInput}
         onSendMessage={handleSendMessage}
+        onStopExecution={handleStopExecution}
         isLoading={isLoading}
         statusText={statusText}
         isSidebarOpen={isSidebarOpen}

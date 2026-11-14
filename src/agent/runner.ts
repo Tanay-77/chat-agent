@@ -250,6 +250,7 @@ export interface RunAgentOptions {
   timezone?: string;
   userId?: string;
   mockSearchResults?: WebSearchResultItem[];
+  signal?: AbortSignal;
 }
 
 /**
@@ -268,6 +269,11 @@ export async function runAgent(
   options: RunAgentOptions = {}
 ): Promise<string> {
   const requestStartTime = performance.now();
+
+  if (options.signal?.aborted) {
+    onEvent({ type: 'done' });
+    return '';
+  }
 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -349,6 +355,9 @@ export async function runAgent(
     modelContent: any;
     durationMs: number;
   }> {
+    if (options.signal?.aborted) {
+      return { text: '', functionCalls: [], modelContent: null, durationMs: 0 };
+    }
     const { label, mode, allowedFunctionNames, streamTokens } = params;
     const callStart = performance.now();
 
@@ -365,6 +374,10 @@ export async function runAgent(
       thinkingConfig: { thinkingBudget: effectiveThinkingBudget }
     };
 
+    if (options.signal) {
+      streamConfig.abortSignal = options.signal;
+    }
+
     if (mode !== FunctionCallingConfigMode.NONE) {
       streamConfig.tools = [{ functionDeclarations: [webSearchToolDeclaration] }];
     }
@@ -374,6 +387,9 @@ export async function runAgent(
     let httpStatus = 200;
 
     for (let attempt = 0; attempt <= 2; attempt++) {
+      if (options.signal?.aborted) {
+        return { text: '', functionCalls: [], modelContent: null, durationMs: 0 };
+      }
       try {
         responseStream = await ai.models.generateContentStream({
           model: modelName,
@@ -383,6 +399,9 @@ export async function runAgent(
         httpStatus = 200;
         break;
       } catch (apiErr: any) {
+        if (options.signal?.aborted) {
+          return { text: '', functionCalls: [], modelContent: null, durationMs: 0 };
+        }
         const status = apiErr?.status || (String(apiErr?.message).includes('429') ? 429 : String(apiErr?.message).includes('503') ? 503 : 500);
         httpStatus = status;
         const isRetryable = status === 429 || status === 503;
@@ -405,6 +424,9 @@ export async function runAgent(
     let outputTokens = 0;
 
     for await (const chunk of responseStream) {
+      if (options.signal?.aborted) {
+        break;
+      }
       if (chunk.candidates?.[0]?.content) {
         modelContent = chunk.candidates[0].content;
       }
@@ -466,6 +488,14 @@ export async function runAgent(
 
     stageLlm1Ms = call1.durationMs;
 
+    if (options.signal?.aborted) {
+      if (call1.text) {
+        insertMessage(sessionId, 'assistant', call1.text, new Date().toISOString(), null, false, effectiveTz, effectiveUserId);
+      }
+      onEvent({ type: 'done' });
+      return call1.text;
+    }
+
     if (call1.functionCalls.length === 0) {
       // Direct text answer (no tool call was needed)
       finalAnswer = call1.text;
@@ -487,6 +517,7 @@ export async function runAgent(
       const effectiveSearchStartDate = temporalRes.searchWindow?.startDate;
 
       for (const call of call1.functionCalls) {
+        if (options.signal?.aborted) break;
         if (call.name === 'web_search') {
           totalSearchCalls++;
           const rawArgs = call.args as WebSearchArgs;
@@ -626,6 +657,11 @@ export async function runAgent(
         console.log(`[Agent Runner Request ${sessionId}] Top 5 Search Results: none`);
       }
 
+      if (options.signal?.aborted) {
+        onEvent({ type: 'done' });
+        return '';
+      }
+
       // ─── Turn 2: Synthesis (toolConfig mode set to NONE) ───
       const synthesisCall = await executeGeminiCall({
         label: 'LLM call 2',
@@ -635,6 +671,14 @@ export async function runAgent(
 
       stageLlm2Ms = synthesisCall.durationMs;
       finalAnswer = synthesisCall.text;
+
+      if (options.signal?.aborted) {
+        if (finalAnswer) {
+          insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz, effectiveUserId);
+        }
+        onEvent({ type: 'done' });
+        return finalAnswer;
+      }
     }
 
     if (!finalAnswer) {
