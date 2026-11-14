@@ -142,6 +142,101 @@ Retrieved past conversation is what the USER said or what the assistant claimed 
    - If no updates or changes are returned for a provider, do not assert with certainty that nothing changed. Explicitly say what you searched, the date window evaluated (e.g., "since [YYYY-MM-DD]"), and that no relevant news or published updates were found.`;
 }
 
+export type IntentCase = 'RECALL' | 'VERIFY' | 'AUTO';
+
+export interface IntentResult {
+  intent: IntentCase;
+  reason: string;
+  firstTurnMode: FunctionCallingConfigMode;
+}
+
+/**
+ * Classifies the user's intent into three distinct paths:
+ * 1. RECALL: User asks what they said or asked ("what did I tell you", "what did I ask", "do you remember").
+ *    Use memory only. First-turn tool mode NONE, so no web_search. Answer from retrieved history.
+ * 2. VERIFY: User asks whether something from earlier is still true, changed, or current
+ *    ("still correct", "changed since", "any updates", "is that still the price")
+ *    or uses latest/current/pricing wording about a topic.
+ *    Force web_search on the first turn, with search window starting at anchor conversation date.
+ * 3. AUTO: Everything else. Tool mode AUTO (no forced search).
+ */
+export function classifyIntent(
+  userMessage: string,
+  temporalRes?: {
+    hasTemporalReference?: boolean;
+    detectedDates?: string[];
+    matchedMessages?: any[];
+    searchWindow?: { startDate?: string; endDate?: string };
+  }
+): IntentResult {
+  const text = userMessage.trim();
+
+  // 1. VERIFY: asks whether something from earlier is still true, changed, or current,
+  // or uses latest/current/pricing wording about a topic.
+  const verifyPastStatePatterns = [
+    /\bstill\s+(correct|true|valid|accurate|the\s+same|the\s+price|in\s+effect|active)\b/i,
+    /\b(is|are|was|were)\s+.*?\bstill\b/i,
+    /\bchanged\s+since\b/i,
+    /\bany\s+(updates|changes|new\s+releases|new\s+features)\b/i,
+    /\bhas\s+.*?\b(changed|updated|increased|decreased)\b/i,
+    /\bhas\s+(anything|any(\s+of\s+them)?|it|pricing)\s+changed\b/i,
+    /\b(shipped|released|launched)\s+.*?\bsince\b/i,
+    /\b(change|changes|changed)\s+since\b/i
+  ];
+
+  const verifyTopicPatterns = [
+    /\b(latest|current|newest)\b/i,
+    /\b(pricing|price|plans|subscription\s+rates|tier\s+pricing)\b/i
+  ];
+
+  const hasVerifyPastState = verifyPastStatePatterns.some((pattern) => pattern.test(text));
+  const hasVerifyTopic = verifyTopicPatterns.some((pattern) => pattern.test(text));
+
+  const hasContextualChange =
+    /\b(any\s+changes|did\s+anything\s+change|has\s+it\s+changed)\b/i.test(text) &&
+    Boolean(temporalRes?.hasTemporalReference || (temporalRes?.matchedMessages && temporalRes.matchedMessages.length > 0));
+
+  if (hasVerifyPastState || hasVerifyTopic || hasContextualChange) {
+    const reason = hasVerifyPastState
+      ? 'User asked whether past information is still true, changed, or current'
+      : hasVerifyTopic
+      ? 'User query contains latest/current/pricing wording about a topic'
+      : 'User asked if anything changed relative to retrieved conversation';
+
+    return {
+      intent: 'VERIFY',
+      reason,
+      firstTurnMode: FunctionCallingConfigMode.ANY
+    };
+  }
+
+  // 2. RECALL: user is asking what they said or asked ("what did I tell you", "what did I ask", "do you remember").
+  const recallPatterns = [
+    /\bwhat\s+did\s+(i|we)\s+(tell\s+you|ask(\s+you)?|say|mention|shortlist|discuss|talk\s+about|decide)\b/i,
+    /\bwhat\s+(was|were)\s+(the\s+|my\s+|our\s+)?(shortlist|question(s)?|discussion|options|recommendation(s)?)\b/i,
+    /\bdo\s+you\s+remember\b/i,
+    /\bdid\s+i\s+(tell\s+you|ask(\s+you)?|mention|say)\b/i,
+    /\b(tell\s+me|remind\s+me)\s+what\s+(i|we)\s+(said|told\s+you|asked|discussed|talked\s+about)\b/i,
+    /\bwhat\s+did\s+i\s+tell\s+you\b/i
+  ];
+
+  const isRecall = recallPatterns.some((pattern) => pattern.test(text));
+  if (isRecall) {
+    return {
+      intent: 'RECALL',
+      reason: 'User asked what they said or asked in earlier conversation (memory recall only)',
+      firstTurnMode: FunctionCallingConfigMode.NONE
+    };
+  }
+
+  // 3. AUTO: everything else
+  return {
+    intent: 'AUTO',
+    reason: 'Standard conversational query without forced verification or recall',
+    firstTurnMode: FunctionCallingConfigMode.AUTO
+  };
+}
+
 export interface RunAgentOptions {
   forceSequentialSearch?: boolean;
   thinkingBudget?: number;
@@ -177,15 +272,17 @@ export async function runAgent(
   }
 
   // 1. Emit an SSE 'status' event immediately when request arrives (before model calls)
-  const changeCurrentRegex = /\b(still|changed|since|current|latest|now|pricing|new)\b/i;
-  const hasChangeWording = changeCurrentRegex.test(userMessage);
+  const initialIntent = classifyIntent(userMessage);
   const hasPastReference =
-    /\b(last|previous|yesterday|ago|since|earlier|before|shortlisted|asked you|remember|this morning)\b/i.test(userMessage) ||
+    initialIntent.intent === 'RECALL' ||
+    /\b(last|previous|yesterday|ago|since\s+(last|yesterday|\d|mon|tue|wed|thu|fri|sat|sun)|earlier|before|shortlisted|asked you|remember|this morning)\b/i.test(userMessage) ||
     /\b\d{1,2}\/\d{1,2}\b/.test(userMessage);
 
   onEvent({
     type: 'status',
-    message: hasPastReference ? 'Checking earlier conversation…' : 'Searching…'
+    message: hasPastReference
+      ? 'Checking earlier conversation…'
+      : (initialIntent.intent === 'VERIFY' ? 'Searching…' : 'Thinking…')
   });
 
   const modelName = process.env.MODEL_NAME || 'gemini-3.1-flash-lite';
@@ -232,12 +329,6 @@ export async function runAgent(
   const effectiveThinkingBudget = typeof options.thinkingBudget === 'number'
     ? options.thinkingBudget
     : 0;
-
-  // Intent check before first model call:
-  const hasAnchoredPastConvo =
-    (temporalRes.hasTemporalReference || temporalRes.detectedDates.length > 0) &&
-    temporalRes.matchedMessages.length > 0;
-  const shouldForceSearchFirstTurn = hasChangeWording || hasAnchoredPastConvo;
 
   // Helper for per-call execution, timing, retry, and logging
   async function executeGeminiCall(params: {
@@ -348,19 +439,21 @@ export async function runAgent(
 
   try {
     // ─── Turn 1: Search Dispatch (or direct answer if no-search) ───
-    const turn1Mode = shouldForceSearchFirstTurn
-      ? FunctionCallingConfigMode.ANY
-      : FunctionCallingConfigMode.AUTO;
+    const intentResult = classifyIntent(userMessage, temporalRes);
+    const turn1Mode = intentResult.firstTurnMode;
 
     console.log(
-      `[Agent Runner Turn 1] Function calling path: ${shouldForceSearchFirstTurn ? 'FORCED (mode: ANY)' : 'AUTO (mode: AUTO)'} ` +
-      `[reason: ${shouldForceSearchFirstTurn ? (hasChangeWording ? 'change/current wording' : 'anchored past memory') : 'default'}]`
+      `[Agent Runner Intent] Case chosen: ${intentResult.intent} (mode: ${turn1Mode}) [reason: ${intentResult.reason}]`
+    );
+    console.log(
+      `[Agent Runner Turn 1] Function calling path: ${turn1Mode === FunctionCallingConfigMode.ANY ? 'FORCED (mode: ANY)' : turn1Mode === FunctionCallingConfigMode.NONE ? 'MEMORY ONLY (mode: NONE)' : 'AUTO (mode: AUTO)'} ` +
+      `[intent: ${intentResult.intent}, reason: ${intentResult.reason}]`
     );
 
     const call1 = await executeGeminiCall({
       label: 'LLM call 1',
       mode: turn1Mode,
-      allowedFunctionNames: ['web_search'],
+      allowedFunctionNames: turn1Mode === FunctionCallingConfigMode.NONE ? undefined : ['web_search'],
       streamTokens: true
     });
 

@@ -19,7 +19,8 @@ import {
   TAVILY_PUBLISH_DATE_NOTE,
   WebSearchResultItem
 } from './tools/webSearch.js';
-import { buildCalendarReference, buildSystemPrompt, runAgent, AgentEvent } from './agent/runner.js';
+import { FunctionCallingConfigMode } from '@google/genai';
+import { buildCalendarReference, buildSystemPrompt, runAgent, AgentEvent, classifyIntent } from './agent/runner.js';
 import { signCookieValue, unsignCookieValue, parseCookies, USER_COOKIE_NAME } from './index.js';
 
 async function runTests() {
@@ -873,7 +874,164 @@ async function runTests() {
   clearDatabase(groundingUser);
   console.log('  ✓ Grounding & anti-contamination verified: Answer stated 26.13.0 and strictly avoided repeating 22.11.0.');
 
-  console.log('\nAll 8 test suites passed successfully!');
+  // 9. Intent Classification & Search Policy (RECALL, VERIFY, AUTO) Tests
+  console.log('\n[9/9] Testing Intent Classification & Search Policy (RECALL, VERIFY, AUTO)...');
+  const policyUser = 'user-policy-' + Date.now();
+  clearDatabase(policyUser);
+
+  // Fixed test reference date: Saturday 2026-11-14 12:00:00 UTC
+  // "yesterday" relative to 2026-11-14 is Friday 2026-11-13
+  const policyNow = new Date('2026-11-14T12:00:00Z');
+
+  // Seed yesterday's conversation (2026-11-13)
+  insertMessage(
+    'session-yesterday-notes',
+    'user',
+    'I am building a web app using SvelteKit and Tailwind CSS.',
+    '2026-11-13T10:00:00Z',
+    null,
+    false,
+    'UTC',
+    policyUser
+  );
+  insertMessage(
+    'session-yesterday-notes',
+    'assistant',
+    'SvelteKit and Tailwind CSS is an excellent stack for fast web apps.',
+    '2026-11-13T10:01:00Z',
+    null,
+    false,
+    'UTC',
+    policyUser
+  );
+
+  // ----------------------------------------------------
+  // Test A: "what did I tell you yesterday" (RECALL -> 0 searches)
+  // ----------------------------------------------------
+  console.log('  -> Testing RECALL: "what did I tell you yesterday"...');
+  const recallIntent = classifyIntent('what did I tell you yesterday');
+  if (recallIntent.intent !== 'RECALL') {
+    throw new Error(`Expected RECALL intent for "what did I tell you yesterday", got ${recallIntent.intent}`);
+  }
+  if (recallIntent.firstTurnMode !== FunctionCallingConfigMode.NONE) {
+    throw new Error(`Expected firstTurnMode NONE for RECALL, got ${recallIntent.firstTurnMode}`);
+  }
+
+  const recallEvents: AgentEvent[] = [];
+  const recallAnswer = await runAgent(
+    'what did I tell you yesterday',
+    'session-recall-eval',
+    (ev) => recallEvents.push(ev),
+    policyNow,
+    { userId: policyUser }
+  );
+
+  const recallToolCalls = recallEvents.filter((ev) => ev.type === 'tool_start');
+  if (recallToolCalls.length !== 0) {
+    throw new Error(
+      `Over-triggered search bug! Expected 0 searches for RECALL ("what did I tell you yesterday"), got ${recallToolCalls.length}`
+    );
+  }
+
+  const lowerRecallAnswer = recallAnswer.toLowerCase();
+  if (!lowerRecallAnswer.includes('sveltekit') && !lowerRecallAnswer.includes('tailwind')) {
+    throw new Error(`Expected answer to recall SvelteKit/Tailwind from memory, got: "${recallAnswer}"`);
+  }
+  console.log('  ✓ RECALL passed: 0 searches performed, answered purely from retrieved memory.');
+
+  // ----------------------------------------------------
+  // Test B: "is your answer from yesterday still correct?" (VERIFY -> 1 search, window starts 2026-11-13)
+  // ----------------------------------------------------
+  console.log('  -> Testing VERIFY: "is your answer from yesterday still correct?"...');
+  const verifyIntent = classifyIntent('is your answer from yesterday still correct?');
+  if (verifyIntent.intent !== 'VERIFY') {
+    throw new Error(`Expected VERIFY intent for "is your answer from yesterday still correct?", got ${verifyIntent.intent}`);
+  }
+  if (verifyIntent.firstTurnMode !== FunctionCallingConfigMode.ANY) {
+    throw new Error(`Expected firstTurnMode ANY for VERIFY, got ${verifyIntent.firstTurnMode}`);
+  }
+
+  // Verify search window calculation starts at anchor conversation date 2026-11-13
+  const verifyTemporal = resolveTemporalContext(
+    'is your answer from yesterday still correct?',
+    'session-verify-eval',
+    policyNow,
+    MAX_CONTEXT_CHARS,
+    'UTC',
+    policyUser
+  );
+
+  if (!verifyTemporal.searchWindow || verifyTemporal.searchWindow.startDate !== '2026-11-13') {
+    throw new Error(
+      `Expected searchWindow startDate to be anchor date 2026-11-13, got: ${verifyTemporal.searchWindow?.startDate}`
+    );
+  }
+
+  const mockVerifyResults: WebSearchResultItem[] = [
+    {
+      query: 'SvelteKit Tailwind compatibility 2026',
+      title: 'SvelteKit and Tailwind CSS Status',
+      url: 'https://svelte.dev/docs/kit/tailwind',
+      published_date: '2026-11-13',
+      snippet: 'SvelteKit and Tailwind CSS continue to be fully supported and recommended as of November 2026.',
+      note: TAVILY_PUBLISH_DATE_NOTE
+    }
+  ];
+
+  const verifyEvents: AgentEvent[] = [];
+  await runAgent(
+    'is your answer from yesterday still correct?',
+    'session-verify-eval',
+    (ev) => verifyEvents.push(ev),
+    policyNow,
+    {
+      userId: policyUser,
+      mockSearchResults: mockVerifyResults
+    }
+  );
+
+  const verifyToolCalls = verifyEvents.filter((ev) => ev.type === 'tool_start');
+  if (verifyToolCalls.length !== 1) {
+    throw new Error(
+      `Expected exactly 1 search for VERIFY ("is your answer from yesterday still correct?"), got ${verifyToolCalls.length}`
+    );
+  }
+  console.log('  ✓ VERIFY passed: exactly 1 search performed, search window starts at 2026-11-13.');
+
+  // ----------------------------------------------------
+  // Test C: "thanks, that's helpful since I'm new" (AUTO -> no forced search)
+  // ----------------------------------------------------
+  console.log('  -> Testing AUTO: "thanks, that\'s helpful since I\'m new"...');
+  const autoIntent = classifyIntent("thanks, that's helpful since I'm new");
+  if (autoIntent.intent !== 'AUTO') {
+    throw new Error(
+      `Over-triggered search bug! Expected AUTO intent for "thanks, that's helpful since I'm new", got ${autoIntent.intent}`
+    );
+  }
+  if (autoIntent.firstTurnMode !== FunctionCallingConfigMode.AUTO) {
+    throw new Error(`Expected firstTurnMode AUTO (not ANY/forced), got ${autoIntent.firstTurnMode}`);
+  }
+
+  const autoEvents: AgentEvent[] = [];
+  await runAgent(
+    "thanks, that's helpful since I'm new",
+    'session-auto-eval',
+    (ev) => autoEvents.push(ev),
+    policyNow,
+    { userId: policyUser }
+  );
+
+  const autoToolCalls = autoEvents.filter((ev) => ev.type === 'tool_start');
+  if (autoToolCalls.length > 0) {
+    throw new Error(
+      `Over-triggered search bug! Expected 0 searches for AUTO conversational remark, got ${autoToolCalls.length}`
+    );
+  }
+  console.log('  ✓ AUTO passed: no forced search, treated as conversational turn.');
+
+  clearDatabase(policyUser);
+
+  console.log('\nAll 9 test suites passed successfully!');
 }
 
 runTests().catch((err) => {
