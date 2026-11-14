@@ -13,6 +13,7 @@ interface ChatAreaProps {
   sessionId: string;
   isSidebarOpen: boolean;
   onToggleSidebar: () => void;
+  onNewChat: () => void;
 }
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
@@ -24,7 +25,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   statusText,
   sessionId,
   isSidebarOpen,
-  onToggleSidebar
+  onToggleSidebar,
+  onNewChat
 }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -63,6 +65,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               <line x1="9" y1="3" x2="9" y2="21" />
             </svg>
             <span>{isSidebarOpen ? 'Hide sidebar' : 'Open sidebar'}</span>
+          </button>
+          <button
+            type="button"
+            className="navbar-new-chat-btn"
+            onClick={onNewChat}
+            disabled={isLoading}
+            title="Start a new chat session"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            <span>New Chat</span>
           </button>
           <div className="navbar-session">
             <span className="session-tag">SESSION ID</span>

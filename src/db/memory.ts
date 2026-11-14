@@ -17,6 +17,13 @@ export interface Message {
   rank?: number; // SQLite FTS5 BM25 score (when retrieved via full-text search)
 }
 
+export interface Session {
+  id: string;
+  user_id: string;
+  title?: string | null;
+  created_at: string;
+}
+
 // Ensure database directory exists
 const DB_DIR = path.resolve(process.cwd(), 'data');
 if (!fs.existsSync(DB_DIR)) {
@@ -50,6 +57,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_messages_date_str ON messages(date_str);
   CREATE INDEX IF NOT EXISTS idx_messages_session_date ON messages(session_id, date_str);
   CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    title TEXT,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+  CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at);
 
   -- SQLite FTS5 Full-Text Search Virtual Table & Triggers
   CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -383,14 +400,57 @@ export function getAllMessages(limit: number = 500, userId?: string): Message[] 
 }
 
 /**
- * Clears messages from the database (optionally scoped to a user) and rebuilds FTS5 index.
+ * Creates a new session record scoped to a user.
+ * Does NOT delete or modify any existing messages.
+ */
+export function createSession(
+  userId: string = 'default-user',
+  title?: string | null,
+  sessionId?: string
+): Session {
+  const id = sessionId || `session-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+  const createdAt = new Date().toISOString();
+  const sessionTitle = title ? title.trim() : null;
+
+  const stmt = db.prepare(`
+    INSERT INTO sessions (id, user_id, title, created_at)
+    VALUES (?, ?, ?, ?)
+  `);
+  stmt.run(id, userId, sessionTitle, createdAt);
+
+  return {
+    id,
+    user_id: userId,
+    title: sessionTitle,
+    created_at: createdAt
+  };
+}
+
+/**
+ * Retrieves all sessions for a specific user, sorted most recent first.
+ */
+export function getUserSessions(userId: string = 'default-user'): Session[] {
+  const stmt = db.prepare(`
+    SELECT id, user_id, title, created_at
+    FROM sessions
+    WHERE user_id = ?
+    ORDER BY created_at DESC
+  `);
+  return stmt.all(userId) as Session[];
+}
+
+/**
+ * Clears messages and sessions from the database (optionally scoped to a user) and rebuilds FTS5 index.
  */
 export function clearDatabase(userId?: string): void {
   if (userId) {
-    const stmt = db.prepare('DELETE FROM messages WHERE user_id = ?');
-    stmt.run(userId);
+    const stmtMsg = db.prepare('DELETE FROM messages WHERE user_id = ?');
+    stmtMsg.run(userId);
+    const stmtSess = db.prepare('DELETE FROM sessions WHERE user_id = ?');
+    stmtSess.run(userId);
   } else {
     db.exec('DELETE FROM messages;');
+    db.exec('DELETE FROM sessions;');
   }
   try {
     db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild');");

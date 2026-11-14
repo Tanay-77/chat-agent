@@ -7,6 +7,7 @@ interface SidebarProps {
   timeline: Record<string, HistoricalMessage[]>;
   onSelectDate: (date: string, messages: HistoricalMessage[]) => void;
   onRunQuickTest: (prompt: string) => void;
+  onNewChat: () => void;
   onResetDatabase: () => void;
   isLoading: boolean;
 }
@@ -38,6 +39,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   timeline,
   onSelectDate,
   onRunQuickTest,
+  onNewChat,
   onResetDatabase,
   isLoading
 }) => {
@@ -65,6 +67,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <line x1="18" y1="6" x2="6" y2="18" />
             <line x1="6" y1="6" x2="18" y2="18" />
           </svg>
+        </button>
+      </div>
+
+      <div className="sidebar-actions">
+        <button
+          type="button"
+          className="new-chat-btn"
+          onClick={onNewChat}
+          disabled={isLoading}
+          title="Start a new chat session"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          <span>+ New Chat</span>
         </button>
       </div>
 
@@ -135,9 +153,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className="reset-db-btn"
             onClick={onResetDatabase}
             disabled={isLoading}
-            title="Clear all stored messages to empty state"
+            title="Permanently erase all stored messages and sessions across all chats"
           >
-            ↻ Clear Database (Reset)
+            ⚠ Clear All Memory
           </button>
         </section>
       </div>

@@ -12,10 +12,36 @@ export const App: React.FC = () => {
   const [timeline, setTimeline] = useState<Record<string, HistoricalMessage[]>>({});
   const [inspectDate, setInspectDate] = useState<string | null>(null);
   const [inspectMessages, setInspectMessages] = useState<HistoricalMessage[]>([]);
-  const [sessionId] = useState('eval-session-live');
+  const [sessionId, setSessionId] = useState('eval-session-live');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   const toggleSidebar = () => setIsSidebarOpen((prev) => !prev);
+
+  const handleNewChat = async () => {
+    try {
+      setIsLoading(true);
+      setStatusText('Starting new chat session...');
+      const res = await fetch('/api/session/new', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const newSessionId = data.sessionId || data.session_id;
+        setSessionId(newSessionId);
+        setMessages([]);
+        setInput('');
+        await fetchTimeline();
+      } else {
+        console.error('Failed to create new session');
+      }
+    } catch (err: any) {
+      console.error('Error creating new session:', err);
+    } finally {
+      setIsLoading(false);
+      setStatusText('');
+    }
+  };
 
   const fetchTimeline = async () => {
     try {
@@ -177,7 +203,13 @@ export const App: React.FC = () => {
   };
 
   const handleResetDatabase = async () => {
-    if (!window.confirm('Clear all conversation history and reset SQLite database to empty state?')) return;
+    if (
+      !window.confirm(
+        'Clear all conversation history and reset SQLite database to empty state?\n\nWARNING: This will permanently delete all past messages and memory across all sessions.'
+      )
+    ) {
+      return;
+    }
     try {
       setIsLoading(true);
       await fetch('/api/reset', { method: 'POST' });
@@ -201,6 +233,7 @@ export const App: React.FC = () => {
           setInspectMessages(msgs);
         }}
         onRunQuickTest={handleSendMessage}
+        onNewChat={handleNewChat}
         onResetDatabase={handleResetDatabase}
         isLoading={isLoading}
       />
@@ -215,6 +248,7 @@ export const App: React.FC = () => {
         sessionId={sessionId}
         isSidebarOpen={isSidebarOpen}
         onToggleSidebar={toggleSidebar}
+        onNewChat={handleNewChat}
       />
 
       <InspectorModal

@@ -13,9 +13,12 @@ import {
   searchMessagesByDateRange,
   searchMessagesFTS,
   insertMessage,
+  createSession,
+  getUserSessions,
   clearDatabase,
   MessageRole,
   Message,
+  Session,
   db
 } from './db/memory.js';
 import { runAgent, AgentEvent } from './agent/runner.js';
@@ -224,6 +227,37 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       res.write('data: [DONE]\n\n');
       res.end();
     }
+  }
+});
+
+// ----------------------------------------------------
+// POST /api/session/new (Create New Chat Session)
+// ----------------------------------------------------
+
+app.post('/api/session/new', (req: Request, res: Response) => {
+  try {
+    const session = createSession(req.userId, req.body?.title);
+    return res.status(201).json({
+      success: true,
+      sessionId: session.id,
+      session_id: session.id,
+      userId: req.userId,
+      createdAt: session.created_at
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/sessions', (req: Request, res: Response) => {
+  try {
+    const sessions = getUserSessions(req.userId);
+    return res.json({
+      userId: req.userId,
+      sessions
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
   }
 });
 

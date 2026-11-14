@@ -9,7 +9,9 @@ import {
   getDatabaseStats,
   getAllMessages,
   clearDatabase,
-  isDatabaseEmpty
+  isDatabaseEmpty,
+  createSession,
+  getUserSessions
 } from './db/memory.js';
 import { resolveTemporalContext, MAX_CONTEXT_CHARS, parseDates, formatDateInTz, setUserTimezone } from './context/temporalResolver.js';
 import {
@@ -875,7 +877,7 @@ async function runTests() {
   console.log('  ✓ Grounding & anti-contamination verified: Answer stated 26.13.0 and strictly avoided repeating 22.11.0.');
 
   // 9. Intent Classification & Search Policy (RECALL, VERIFY, AUTO) Tests
-  console.log('\n[9/9] Testing Intent Classification & Search Policy (RECALL, VERIFY, AUTO)...');
+  console.log('\n[9/10] Testing Intent Classification & Search Policy (RECALL, VERIFY, AUTO)...');
   const policyUser = 'user-policy-' + Date.now();
   clearDatabase(policyUser);
 
@@ -1031,7 +1033,89 @@ async function runTests() {
 
   clearDatabase(policyUser);
 
-  console.log('\nAll 9 test suites passed successfully!');
+  // ----------------------------------------------------
+  // 10. New Chat & Cross-Session Memory Recall
+  // ----------------------------------------------------
+  console.log('\n[10/10] Testing "New Chat" Session Creation & Cross-Session Memory Recall...');
+  const newChatUserId = 'user-newchat-eval-' + Date.now();
+  clearDatabase(newChatUserId);
+
+  // 1. In Session A, user stores an important fact
+  const sessionAId = 'session-alpha-test';
+  const sessionA = createSession(newChatUserId, 'Session Alpha', sessionAId);
+  insertMessage(
+    sessionA.id,
+    'user',
+    'I am planning a trip to Kyoto in April to see the cherry blossoms.',
+    '2026-11-10T10:00:00Z',
+    null,
+    false,
+    'UTC',
+    newChatUserId
+  );
+  insertMessage(
+    sessionA.id,
+    'assistant',
+    'Kyoto in April is spectacular! Maruyama Park and the Philosopher\'s Path are great spots.',
+    '2026-11-10T10:01:00Z',
+    null,
+    false,
+    'UTC',
+    newChatUserId
+  );
+
+  // Verify Session A has messages
+  const sessionAMessages = getRecentMessages(sessionA.id, 10, newChatUserId);
+  if (sessionAMessages.length !== 2) {
+    throw new Error(`Expected 2 messages in Session A, got ${sessionAMessages.length}`);
+  }
+
+  // 2. Click "New Chat": calls createSession to create a new session row
+  const sessionB = createSession(newChatUserId, 'Session Beta');
+  if (!sessionB.id || sessionB.user_id !== newChatUserId) {
+    throw new Error(`Failed to create Session B for user ${newChatUserId}`);
+  }
+
+  // Verify Session A messages were NOT deleted or modified by creating Session B
+  const sessionAMessagesAfterNewChat = getRecentMessages(sessionA.id, 10, newChatUserId);
+  if (sessionAMessagesAfterNewChat.length !== 2) {
+    throw new Error(
+      `Messages were deleted/modified! Expected 2 messages still in Session A, got ${sessionAMessagesAfterNewChat.length}`
+    );
+  }
+
+  // Verify user sessions list contains both sessions
+  const userSessions = getUserSessions(newChatUserId);
+  if (userSessions.length < 2) {
+    throw new Error(`Expected at least 2 sessions for user, got ${userSessions.length}`);
+  }
+
+  // 3. In Session B, ask about Session A's information
+  console.log('  -> Asking in Session B: "What city did I say I am planning to visit in April?"...');
+  const sessionBEvents: AgentEvent[] = [];
+  const sessionBAnswer = await runAgent(
+    'What city did I say I am planning to visit in April?',
+    sessionB.id,
+    (ev) => sessionBEvents.push(ev),
+    policyNow,
+    { userId: newChatUserId }
+  );
+
+  const lowerBAnswer = sessionBAnswer.toLowerCase();
+  if (!lowerBAnswer.includes('kyoto')) {
+    throw new Error(`Expected answer in Session B to recall "Kyoto" from Session A, got: "${sessionBAnswer}"`);
+  }
+  console.log('  ✓ Cross-session memory recall passed: Session B successfully retrieved Kyoto from Session A.');
+
+  // Clean up
+  clearDatabase(newChatUserId);
+  const clearedSessions = getUserSessions(newChatUserId);
+  if (clearedSessions.length !== 0) {
+    throw new Error(`Expected sessions to be cleared, found ${clearedSessions.length}`);
+  }
+  console.log('  ✓ Clear all memory passed: wiped both messages and session rows.');
+
+  console.log('\nAll 10 test suites passed successfully!');
 }
 
 runTests().catch((err) => {
