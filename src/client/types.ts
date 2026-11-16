@@ -1,6 +1,7 @@
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  created_at?: string;
   trace?: AgentTraceEvent[];
   _streaming?: boolean;
 }

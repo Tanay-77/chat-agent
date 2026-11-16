@@ -40,7 +40,8 @@ export const App: React.FC = () => {
         setMessages(
           rawMsgs.map((m: any) => ({
             role: m.role,
-            content: m.content
+            content: m.content,
+            created_at: m.created_at
           }))
         );
         setSessionId(selectedId);
@@ -90,7 +91,8 @@ export const App: React.FC = () => {
     if (!trimmed || isLoading) return;
 
     setInput('');
-    setMessages((prev) => [...prev, { role: 'user', content: trimmed }]);
+    const userCreatedAt = new Date().toISOString();
+    setMessages((prev) => [...prev, { role: 'user', content: trimmed, created_at: userCreatedAt }]);
     setIsLoading(true);
     setStatusText('Resolving temporal context & memory...');
 
@@ -153,6 +155,7 @@ export const App: React.FC = () => {
                 {
                   role: 'assistant',
                   content: assistantText,
+                  created_at: new Date().toISOString(),
                   trace: [...currentTrace],
                   _streaming: true
                 }
@@ -176,6 +179,7 @@ export const App: React.FC = () => {
                   {
                     role: 'assistant',
                     content: assistantText,
+                    created_at: new Date().toISOString(),
                     trace: [...currentTrace],
                     _streaming: false
                   }
@@ -188,7 +192,7 @@ export const App: React.FC = () => {
               const last = prev[prev.length - 1];
               if (last && last.role === 'assistant') {
                 const { _streaming, ...clean } = last;
-                return [...prev.slice(0, -1), { ...clean, trace: [...currentTrace] }];
+                return [...prev.slice(0, -1), { ...clean, created_at: clean.created_at || new Date().toISOString(), trace: [...currentTrace] }];
               }
               return prev;
             });
@@ -224,13 +228,14 @@ export const App: React.FC = () => {
             const content = clean.content
               ? `${clean.content}\n\n*[Execution stopped]*`
               : '*[Execution stopped]*';
-            return [...prev.slice(0, -1), { ...clean, content, trace: [...currentTrace] }];
+            return [...prev.slice(0, -1), { ...clean, content, created_at: clean.created_at || new Date().toISOString(), trace: [...currentTrace] }];
           }
           return [
             ...prev,
             {
               role: 'assistant',
               content: '*[Execution stopped]*',
+              created_at: new Date().toISOString(),
               trace: currentTrace
             }
           ];
@@ -241,6 +246,7 @@ export const App: React.FC = () => {
           {
             role: 'assistant',
             content: `**Execution Error:** ${err?.message || 'Connection failure'}`,
+            created_at: new Date().toISOString(),
             trace: currentTrace
           }
         ]);
