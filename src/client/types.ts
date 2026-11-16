@@ -7,11 +7,17 @@ export interface ChatMessage {
 }
 
 export interface AgentTraceEvent {
-  type: 'status' | 'tool_start' | 'tool_end' | 'token' | 'done' | 'error';
-  message?: string;
-  queries?: string[];
+  type: 'status' | 'trace' | 'tool_start' | 'tool_end' | 'token' | 'done' | 'error';
+  step?: 'memory' | 'search';
+  found?: number;
+  snippets?: Array<{ date: string; text: string }>;
+  queries?: number | string[];
+  results?: number;
+  ms?: number;
   resultCount?: number;
   durationMs?: number;
+  text?: string;
+  message?: string;
   content?: string;
   error?: string;
 }

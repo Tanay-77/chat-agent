@@ -23,6 +23,7 @@ import {
 
 export type AgentEventType =
   | 'status'
+  | 'trace'
   | 'tool_start'
   | 'tool_end'
   | 'token'
@@ -31,10 +32,16 @@ export type AgentEventType =
 
 export interface AgentEvent {
   type: AgentEventType;
-  message?: string;
-  queries?: string[];
+  step?: 'memory' | 'search';
+  found?: number;
+  snippets?: Array<{ date: string; text: string }>;
+  queries?: number | string[];
+  results?: number;
+  ms?: number;
   resultCount?: number;
   durationMs?: number;
+  text?: string;
+  message?: string;
   content?: string;
   error?: string;
 }
@@ -284,18 +291,11 @@ export async function runAgent(
     return errorMsg;
   }
 
-  // 1. Emit an SSE 'status' event immediately when request arrives (before model calls)
-  const initialIntent = classifyIntent(userMessage);
-  const hasPastReference =
-    initialIntent.intent === 'RECALL' ||
-    /\b(last|previous|yesterday|ago|since\s+(last|yesterday|\d|mon|tue|wed|thu|fri|sat|sun)|earlier|before|shortlisted|asked you|remember|this morning)\b/i.test(userMessage) ||
-    /\b\d{1,2}\/\d{1,2}\b/.test(userMessage);
-
+  // 1. Emit short transient status event for loading indicator (does not create trace pill)
   onEvent({
     type: 'status',
-    message: hasPastReference
-      ? 'Checking earlier conversation…'
-      : (initialIntent.intent === 'VERIFY' ? 'Searching…' : 'Thinking…')
+    text: 'Working…',
+    message: 'Working…'
   });
 
   const modelName = process.env.MODEL_NAME || 'gemini-3.1-flash-lite';
@@ -311,15 +311,16 @@ export async function runAgent(
   const memoryBlock = temporalRes.formattedContext ? temporalRes.formattedContext.trim() : 'none';
   console.log(`[Agent Runner Request ${sessionId}] Retrieved Memory:\n${memoryBlock}`);
 
-  if (temporalRes.matchedMessages.length > 0) {
-    const datesDesc = temporalRes.detectedDates.length > 0
-      ? temporalRes.detectedDates.join(', ')
-      : 'cross-session history';
-    onEvent({
-      type: 'status',
-      message: `Retrieved historical memory (${temporalRes.matchedMessages.length} turns matched for ${datesDesc})`
-    });
-  }
+  // Send structured trace event AFTER retrieval finishes with N earlier messages injected into prompt (including N=0)
+  onEvent({
+    type: 'trace',
+    step: 'memory',
+    found: temporalRes.matchedMessages.length,
+    snippets: temporalRes.matchedMessages.map((m) => ({
+      date: m.date_str || m.created_at.slice(0, 10),
+      text: m.content
+    }))
+  });
 
   // Insert current user message after resolving historical context so current message is not self-retrieved as past memory
   insertMessage(sessionId, 'user', userMessage, isoNow, null, false, effectiveTz, effectiveUserId);
@@ -409,7 +410,7 @@ export async function runAgent(
           retryCount = attempt + 1;
           const backoffMs = (attempt + 1) * (status === 429 ? 2500 : 2000);
           console.warn(`[Agent Runner ${label}] Gemini API ${status}. Emitting status event and retrying with backoff ${backoffMs}ms...`);
-          onEvent({ type: 'status', message: 'Model busy, retrying…' });
+          onEvent({ type: 'status', text: 'Working…', message: 'Working…' });
           await new Promise((r) => setTimeout(r, backoffMs));
           continue;
         }
@@ -542,6 +543,14 @@ export async function runAgent(
             durationMs: searchDur
           });
 
+          onEvent({
+            type: 'trace',
+            step: 'search',
+            queries: queries.length,
+            results: results.length,
+            ms: searchDur
+          });
+
           turn1Results.push(...results);
 
           const funcResponseObj: any = {
@@ -623,6 +632,14 @@ export async function runAgent(
                 type: 'tool_end',
                 resultCount: results.length,
                 durationMs: searchDur
+              });
+
+              onEvent({
+                type: 'trace',
+                step: 'search',
+                queries: queries.length,
+                results: results.length,
+                ms: searchDur
               });
 
               retryResults.push(...results);

@@ -130,15 +130,13 @@ export const App: React.FC = () => {
           const event: AgentTraceEvent = JSON.parse(payload);
 
           if (event.type === 'status') {
+            setStatusText(event.text || event.message || 'Working…');
+          } else if (event.type === 'trace') {
             currentTrace.push(event);
-            setStatusText(event.message || 'Processing memory...');
           } else if (event.type === 'tool_start') {
-            currentTrace.push(event);
-            const count = event.queries?.length || 0;
-            setStatusText(`Dispatching ${count} batched web searches...`);
+            setStatusText('Working…');
           } else if (event.type === 'tool_end') {
-            currentTrace.push(event);
-            setStatusText(`Synthesizing ${event.resultCount} search results...`);
+            setStatusText('Working…');
           } else if (event.type === 'token') {
             assistantText += event.content || '';
             setStatusText('');

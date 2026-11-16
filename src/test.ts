@@ -25,6 +25,7 @@ import {
 } from './tools/webSearch.js';
 import { FunctionCallingConfigMode } from '@google/genai';
 import { buildCalendarReference, buildSystemPrompt, runAgent, AgentEvent, classifyIntent } from './agent/runner.js';
+import { computeTracePillState } from './client/components/AgentTrace.js';
 import app, { signCookieValue, unsignCookieValue, parseCookies, USER_COOKIE_NAME } from './index.js';
 
 async function runTests() {
@@ -1354,6 +1355,155 @@ async function runTests() {
     }
     console.log('  ✓ POST /api/chat/stop endpoint verified.');
 
+    // ----------------------------------------------------
+    // 13. Testing Trace Pill Structured Events & Render States
+    // ----------------------------------------------------
+    console.log('\n[13/13] Testing Trace Pill Structured Events & Render States...');
+    const traceTestUser = 'user-trace-' + Date.now();
+    clearDatabase(traceTestUser);
+
+    // 13.1 Test: "hi" shows no pill
+    console.log('  -> Testing Case 1: "hi" shows no pill...');
+    const hiEvents: AgentEvent[] = [];
+    const hiAbort = new AbortController();
+    await runAgent(
+      'hi',
+      'session-hi-trace',
+      (ev) => {
+        hiEvents.push(ev);
+        if (ev.type === 'trace' && ev.step === 'memory') {
+          hiAbort.abort();
+        }
+      },
+      policyNow,
+      { userId: traceTestUser, signal: hiAbort.signal }
+    );
+
+    const hiStatus = hiEvents.find((e) => e.type === 'status');
+    if (!hiStatus || (hiStatus.text !== 'Working…' && hiStatus.message !== 'Working…')) {
+      throw new Error(`Expected transient status "Working…", got ${JSON.stringify(hiStatus)}`);
+    }
+
+    const hiMemoryTrace = hiEvents.find((e) => e.type === 'trace' && e.step === 'memory');
+    if (!hiMemoryTrace || hiMemoryTrace.found !== 0) {
+      throw new Error(`Expected memory trace with found=0 for "hi", got ${JSON.stringify(hiMemoryTrace)}`);
+    }
+
+    const hiSearchTrace = hiEvents.filter((e) => e.type === 'trace' && e.step === 'search');
+    if (hiSearchTrace.length !== 0) {
+      throw new Error(`Expected 0 search traces for "hi", got ${hiSearchTrace.length}`);
+    }
+
+    const hiPillState = computeTracePillState(hiEvents as any);
+    if (hiPillState.shouldRender !== false) {
+      throw new Error(`Expected shouldRender=false (no pill) for "hi", got ${JSON.stringify(hiPillState)}`);
+    }
+    console.log('  ✓ Case 1 passed: "hi" shows no pill (found=0, searches=0).');
+
+    // 13.2 Test: "what's my name" (name stored) shows the memory pill with that message as a snippet
+    console.log('  -> Testing Case 2: "what\'s my name" (name stored) shows memory pill with snippet...');
+    insertMessage(
+      'session-name-stored',
+      'user',
+      'My name is Tanay.',
+      '2026-11-13T10:00:00Z',
+      null,
+      false,
+      'UTC',
+      traceTestUser
+    );
+
+    const nameTraceEvents: AgentEvent[] = [];
+    const nameAbort = new AbortController();
+    await runAgent(
+      "what's my name?",
+      'session-name-stored',
+      (ev) => {
+        nameTraceEvents.push(ev);
+        if (ev.type === 'trace' && ev.step === 'memory') {
+          nameAbort.abort();
+        }
+      },
+      policyNow,
+      { userId: traceTestUser, signal: nameAbort.signal }
+    );
+
+    const nameMemTrace = nameTraceEvents.find((e) => e.type === 'trace' && e.step === 'memory');
+    if (!nameMemTrace || !nameMemTrace.found || nameMemTrace.found < 1) {
+      throw new Error(`Expected memory trace with found>=1 for "what's my name?", got ${JSON.stringify(nameMemTrace)}`);
+    }
+    if (!nameMemTrace.snippets || nameMemTrace.snippets.length === 0 || !nameMemTrace.snippets[0].text.includes('Tanay')) {
+      throw new Error(`Expected snippet containing "Tanay", got ${JSON.stringify(nameMemTrace.snippets)}`);
+    }
+
+    const namePillState = computeTracePillState(nameTraceEvents as any);
+    if (!namePillState.shouldRender || namePillState.collapsedText !== 'Used earlier conversation') {
+      throw new Error(`Expected collapsed text "Used earlier conversation", got ${JSON.stringify(namePillState)}`);
+    }
+    if (namePillState.memorySnippets.length === 0 || !namePillState.memorySnippets[0].text.includes('Tanay')) {
+      throw new Error(`Expected memory snippet in pill state containing "Tanay", got ${JSON.stringify(namePillState)}`);
+    }
+    console.log('  ✓ Case 2 passed: "what\'s my name" shows memory pill with snippet.');
+
+    // 13.3 Test: "what's the latest Node.js version" shows only the search pill
+    console.log('  -> Testing Case 3: "what\'s the latest Node.js version" shows only search pill...');
+    const nodeTestUser = 'user-node-' + Date.now();
+    clearDatabase(nodeTestUser);
+
+    const nodeMockSearch: WebSearchResultItem[] = [
+      {
+        query: 'latest nodejs version',
+        title: 'Node.js v24 Release Notes',
+        url: 'https://nodejs.org/en/blog/release/v24.0.0',
+        snippet: 'Node.js 24 is now available as Current.',
+        published_date: '2026-11-10'
+      }
+    ];
+
+    const nodeEvents: AgentEvent[] = [];
+    const nodeAbort = new AbortController();
+    await runAgent(
+      "what's the latest Node.js version",
+      'session-node-test',
+      (ev) => {
+        nodeEvents.push(ev);
+        if (ev.type === 'trace' && ev.step === 'search') {
+          nodeAbort.abort();
+        }
+      },
+      policyNow,
+      {
+        userId: nodeTestUser,
+        mockSearchResults: nodeMockSearch,
+        signal: nodeAbort.signal
+      }
+    );
+
+    const nodeMemTrace = nodeEvents.find((e) => e.type === 'trace' && e.step === 'memory');
+    if (!nodeMemTrace || nodeMemTrace.found !== 0) {
+      throw new Error(`Expected memory found=0 for fresh Node.js query, got ${JSON.stringify(nodeMemTrace)}`);
+    }
+
+    const nodeSearchTrace = nodeEvents.filter((e) => e.type === 'trace' && e.step === 'search');
+    if (nodeSearchTrace.length === 0) {
+      throw new Error(`Expected at least 1 search trace for "what's the latest Node.js version", got ${nodeSearchTrace.length}`);
+    }
+
+    const nodePillState = computeTracePillState(nodeEvents as any);
+    if (!nodePillState.shouldRender || nodePillState.collapsedText !== 'Searched the web') {
+      throw new Error(`Expected collapsed text "Searched the web", got ${JSON.stringify(nodePillState)}`);
+    }
+    if (nodePillState.hasMemory !== false || nodePillState.hasSearch !== true) {
+      throw new Error(`Expected hasMemory=false, hasSearch=true, got ${JSON.stringify(nodePillState)}`);
+    }
+    if (!nodePillState.searchQueries || !nodePillState.searchResults) {
+      throw new Error(`Expected search queries & results in pill state, got ${JSON.stringify(nodePillState)}`);
+    }
+    console.log(`  ✓ Case 3 passed: "what's the latest Node.js version" shows only search pill (${nodePillState.searchQueries} queries · ${nodePillState.searchResults} results · ${nodePillState.searchDurationSec}s).`);
+
+    clearDatabase(traceTestUser);
+    clearDatabase(nodeTestUser);
+
   } finally {
     testServer.close();
     clearDatabase(userAlpha);
@@ -1361,7 +1511,7 @@ async function runTests() {
   }
   console.log('  ✓ Test server closed and database cleaned.');
 
-  console.log('\nAll 12 test suites passed successfully!');
+  console.log('\nAll 13 test suites passed successfully!');
 }
 
 runTests().catch((err) => {
