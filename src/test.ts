@@ -13,7 +13,9 @@ import {
   createSession,
   getUserSessions,
   getUserSessionsWithSummary,
-  getSessionMessages
+  getSessionMessages,
+  formatSessionTitle,
+  cleanupEmptySessions
 } from './db/memory.js';
 import { resolveTemporalContext, MAX_CONTEXT_CHARS, parseDates, formatDateInTz, setUserTimezone } from './context/temporalResolver.js';
 import {
@@ -1261,48 +1263,130 @@ async function runTests() {
     if (!Array.isArray(sessionsList1) || sessionsList1.length !== 1) {
       throw new Error(`Expected 1 session in list for User A, got ${sessionsList1.length}`);
     }
-    const expectedTruncated = longPrompt.substring(0, 60);
+    const expectedTruncated = formatSessionTitle(longPrompt);
     if (sessionsList1[0].title !== expectedTruncated) {
       throw new Error(
-        `Expected title to be first user message truncated to 60 chars ("${expectedTruncated}"), got: "${sessionsList1[0].title}"`
+        `Expected title to be first user message truncated to 50 chars with trailing punctuation trimmed ("${expectedTruncated}"), got: "${sessionsList1[0].title}"`
       );
     }
-    if (sessionsList1[0].title.length !== 60) {
-      throw new Error(`Expected title length to be exactly 60 chars, got ${sessionsList1[0].title.length}`);
-    }
-    console.log('  ✓ Session title accurately truncated to first user message (60 chars).');
+    console.log('  ✓ Session title accurately truncated to first user message (50 chars with trailing punctuation trimmed).');
 
-    // 3. Click "New chat": create Session 2
-    const newChatRes = await fetch(`${baseUrl}/api/session/new`, {
-      method: 'POST',
-      headers: {
-        Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(alphaCookie)}`,
-        'Content-Type': 'application/json'
-      }
+    // 3. Test Requirement 6:
+    // "Tests: clicking New Chat three times creates zero history entries; sending one message creates exactly one entry titled with that message; an empty session never appears in GET /api/sessions."
+    console.log('  -> Testing requirement 6: New Chat 3 times creates zero history entries, sending 1 message creates 1 entry, empty sessions never appear...');
+    
+    const userReq6 = 'user-req6-' + Date.now();
+    const req6Cookie = signCookieValue(userReq6);
+
+    // 3a. Initial state: 0 entries
+    let req6ListRes = await fetch(`${baseUrl}/api/sessions`, {
+      headers: { Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(req6Cookie)}` }
     });
-    if (newChatRes.status !== 201) {
-      throw new Error(`Failed to create new session: HTTP ${newChatRes.status}`);
+    let req6Sessions = await req6ListRes.json();
+    if (req6Sessions.length !== 0) {
+      throw new Error(`Expected 0 sessions initially for new user, got ${req6Sessions.length}`);
     }
-    const newChatData = await newChatRes.json();
-    const sessionA2Id = newChatData.sessionId;
 
-    // After New chat, old session still appears in the list!
-    const listRes2 = await fetch(`${baseUrl}/api/sessions`, {
-      headers: {
-        Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(alphaCookie)}`
-      }
+    // 3b. Click New Chat three times:
+    // On the client, clicking New Chat makes zero server calls. Even if POST /api/session/new is called:
+    for (let i = 0; i < 3; i++) {
+      const ncRes = await fetch(`${baseUrl}/api/session/new`, {
+        method: 'POST',
+        headers: {
+          Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(req6Cookie)}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      if (ncRes.status !== 201) throw new Error(`New chat endpoint failed: HTTP ${ncRes.status}`);
+    }
+
+    // Verify: clicking New Chat three times creates ZERO history entries in GET /api/sessions
+    req6ListRes = await fetch(`${baseUrl}/api/sessions`, {
+      headers: { Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(req6Cookie)}` }
     });
-    const sessionsList2 = await listRes2.json();
-    if (!Array.isArray(sessionsList2) || sessionsList2.length !== 2) {
-      throw new Error(`Expected both sessions to appear in list after New chat, got ${sessionsList2.length}`);
+    req6Sessions = await req6ListRes.json();
+    if (req6Sessions.length !== 0) {
+      throw new Error(`Expected 0 history entries after clicking New Chat three times, got ${req6Sessions.length}`);
     }
-    const sessionA1InList = sessionsList2.find((s: any) => s.id === sessionA1.id);
-    if (!sessionA1InList || sessionA1InList.title !== expectedTruncated) {
-      throw new Error(`Old session missing or corrupted in sessions list after New chat!`);
-    }
-    console.log('  ✓ After New chat, the old session still appears in the list with proper title.');
+    console.log('  ✓ Clicking New Chat three times creates zero history entries.');
 
-    // 4. In Session 2, the agent can still recall Session 1's content
+    // 3c. Sending one message creates exactly one entry titled with that message
+    const req6SessionId = `session-req6-${Date.now()}`;
+    const firstUserMsg = 'What is the fastest land animal in the world???';
+    insertMessage(
+      req6SessionId,
+      'user',
+      firstUserMsg,
+      new Date().toISOString(),
+      null,
+      false,
+      'UTC',
+      userReq6
+    );
+
+    req6ListRes = await fetch(`${baseUrl}/api/sessions`, {
+      headers: { Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(req6Cookie)}` }
+    });
+    req6Sessions = await req6ListRes.json();
+    if (req6Sessions.length !== 1) {
+      throw new Error(`Expected exactly 1 session entry after sending one message, got ${req6Sessions.length}`);
+    }
+    const expectedReq6Title = formatSessionTitle(firstUserMsg); // "What is the fastest land animal in the world"
+    if (req6Sessions[0].title !== expectedReq6Title) {
+      throw new Error(`Expected title "${expectedReq6Title}", got: "${req6Sessions[0].title}"`);
+    }
+    if (req6Sessions[0].id !== req6SessionId) {
+      throw new Error(`Expected session ID ${req6SessionId}, got: ${req6Sessions[0].id}`);
+    }
+    console.log('  ✓ Sending one message creates exactly one entry titled with that message (trailing punctuation trimmed).');
+
+    // 3d. An empty session NEVER appears in GET /api/sessions
+    // Even if an empty session row was manually inserted in the sessions table:
+    db.prepare('INSERT INTO sessions (id, user_id, title, created_at) VALUES (?, ?, ?, ?)').run(
+      `empty-session-ghost-${Date.now()}`,
+      userReq6,
+      'Ghost Empty Session',
+      new Date().toISOString()
+    );
+
+    req6ListRes = await fetch(`${baseUrl}/api/sessions`, {
+      headers: { Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(req6Cookie)}` }
+    });
+    req6Sessions = await req6ListRes.json();
+    if (req6Sessions.length !== 1 || req6Sessions.some((s: any) => s.id.includes('empty-session-ghost'))) {
+      throw new Error('Security/Filtering failure: an empty session appeared in GET /api/sessions!');
+    }
+    console.log('  ✓ An empty session never appears in GET /api/sessions.');
+
+    // 3e. Startup cleanup: deletes sessions that have zero messages
+    const cleanedCount = cleanupEmptySessions();
+    if (cleanedCount < 1) {
+      throw new Error('Expected cleanupEmptySessions to delete the empty session from DB');
+    }
+    console.log('  ✓ One-time cleanup at startup successfully deletes sessions that have zero messages.');
+
+    // 4. In Session 2 for User Alpha, the agent can still recall Session 1's content
+    const sessionA2Id = `session-alpha2-${Date.now()}`;
+    insertMessage(
+      sessionA2Id,
+      'user',
+      'What did I ask you to analyze in CRM earlier?',
+      new Date().toISOString(),
+      null,
+      false,
+      'UTC',
+      userAlpha
+    );
+    insertMessage(
+      sessionA2Id,
+      'assistant',
+      'You asked for a competitive analysis of CRM tools.',
+      new Date().toISOString(),
+      null,
+      false,
+      'UTC',
+      userAlpha
+    );
     console.log('  -> Asking in new session: "What did I ask you to analyze in CRM earlier?"...');
     const recallEvents: AgentEvent[] = [];
     const recallAnswer = await runAgent(

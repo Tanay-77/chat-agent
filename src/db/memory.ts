@@ -131,6 +131,38 @@ try {
 }
 
 /**
+ * One-time startup cleanup: deletes any sessions that have zero messages.
+ */
+export function cleanupEmptySessions(): number {
+  const info = db.prepare(`
+    DELETE FROM sessions
+    WHERE id NOT IN (SELECT DISTINCT session_id FROM messages)
+  `).run();
+  if (info.changes > 0) {
+    console.log(`[DB Cleanup] Deleted ${info.changes} empty session(s) with zero messages.`);
+  }
+  return Number(info.changes);
+}
+
+// Run cleanup at startup
+try {
+  cleanupEmptySessions();
+} catch (err) {
+  console.warn('[DB] cleanupEmptySessions warning:', err);
+}
+
+/**
+ * Formats a session title from message content:
+ * Truncated to 50 chars, with trailing punctuation and whitespace trimmed.
+ */
+export function formatSessionTitle(content: string): string {
+  if (!content) return 'Chat';
+  const sliced = content.slice(0, 50);
+  const trimmed = sliced.replace(/[.,!?:;\-_—…~`'"“”‘’\s]+$/g, '').trim();
+  return trimmed || sliced.trim() || 'Chat';
+}
+
+/**
  * Inserts a new message into the persistent SQLite store scoped to a user.
  */
 export function insertMessage(
@@ -143,6 +175,8 @@ export function insertMessage(
   timezone?: string,
   userId: string = 'default-user'
 ): Message {
+  // Ensure a session row is created (or existing row reused) scoped to userId
+  createSession(userId, null, sessionId);
   const finalCreatedAt = createdAt || new Date().toISOString();
   // Compute YYYY-MM-DD in the user's timezone (not UTC)
   let finalDateStr: string;
@@ -406,8 +440,8 @@ export function getAllMessages(limit: number = 500, userId?: string): Message[] 
 }
 
 /**
- * Creates a new session record scoped to a user.
- * Does NOT delete or modify any existing messages.
+ * Creates a new session record scoped to a user, or reuses an existing session row.
+ * Scoped to userId.
  */
 export function createSession(
   userId: string = 'default-user',
@@ -415,9 +449,15 @@ export function createSession(
   sessionId?: string
 ): Session {
   const id = sessionId || `session-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-  const createdAt = new Date().toISOString();
   const sessionTitle = title ? title.trim() : null;
 
+  // Check if session row already exists for this id
+  const existing = db.prepare('SELECT id, user_id, title, created_at FROM sessions WHERE id = ?').get(id) as Session | undefined;
+  if (existing) {
+    return existing;
+  }
+
+  const createdAt = new Date().toISOString();
   const stmt = db.prepare(`
     INSERT INTO sessions (id, user_id, title, created_at)
     VALUES (?, ?, ?, ?)
@@ -431,6 +471,8 @@ export function createSession(
     created_at: createdAt
   };
 }
+
+export const ensureSession = createSession;
 
 /**
  * Retrieves all sessions for a specific user, sorted most recent first.
@@ -447,50 +489,53 @@ export function getUserSessions(userId: string = 'default-user'): Session[] {
 
 /**
  * Retrieves the session history list for a user, sorted newest first.
- * Title is the first user message in that session truncated to 60 characters.
- * Returns up to 50 items.
+ * Returns ONLY sessions with at least one message.
+ * Title = the first user message truncated to 50 chars, with trailing punctuation trimmed.
+ * Sort by last_message_at, newest first. Returns up to 50 items.
  */
 export function getUserSessionsWithSummary(userId: string = 'default-user'): SessionSummary[] {
   const stmt = db.prepare(`
-    WITH combined_sessions AS (
-      SELECT id, user_id, title, created_at FROM sessions WHERE user_id = ?
-      UNION ALL
-      SELECT session_id AS id, user_id, NULL AS title, MIN(created_at) AS created_at
-      FROM messages WHERE user_id = ?
-      GROUP BY session_id
-    ),
-    unique_sessions AS (
-      SELECT id, user_id, MAX(title) AS title, MIN(created_at) AS created_at
-      FROM combined_sessions
-      GROUP BY id
-    )
     SELECT 
-      s.id,
-      COALESCE(
-        (
-          SELECT SUBSTR(m.content, 1, 60)
-          FROM messages m
-          WHERE m.user_id = s.user_id AND m.session_id = s.id AND m.role = 'user'
-          ORDER BY m.created_at ASC, m.id ASC
-          LIMIT 1
-        ),
-        s.title,
-        'New Chat'
-      ) AS title,
-      COALESCE(
-        (
-          SELECT MAX(m.created_at)
-          FROM messages m
-          WHERE m.user_id = s.user_id AND m.session_id = s.id
-        ),
-        s.created_at
-      ) AS last_message_at
-    FROM unique_sessions s
+      m.session_id AS id,
+      (
+        SELECT m2.content
+        FROM messages m2
+        WHERE m2.session_id = m.session_id AND m2.user_id = ? AND m2.role = 'user'
+        ORDER BY m2.created_at ASC, m2.id ASC
+        LIMIT 1
+      ) AS first_user_content,
+      (
+        SELECT m3.content
+        FROM messages m3
+        WHERE m3.session_id = m.session_id AND m3.user_id = ?
+        ORDER BY m3.created_at ASC, m3.id ASC
+        LIMIT 1
+      ) AS first_any_content,
+      MAX(m.created_at) AS last_message_at
+    FROM messages m
+    WHERE m.user_id = ?
+    GROUP BY m.session_id
+    HAVING COUNT(m.id) > 0
     ORDER BY last_message_at DESC
     LIMIT 50
   `);
 
-  return stmt.all(userId, userId) as SessionSummary[];
+  const rows = stmt.all(userId, userId, userId) as Array<{
+    id: string;
+    first_user_content: string | null;
+    first_any_content: string | null;
+    last_message_at: string;
+  }>;
+
+  return rows.map((row) => {
+    const raw = (row.first_user_content ?? row.first_any_content ?? '').trim();
+    const title = formatSessionTitle(raw);
+    return {
+      id: row.id,
+      title,
+      last_message_at: row.last_message_at
+    };
+  });
 }
 
 /**

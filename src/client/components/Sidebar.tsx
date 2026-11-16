@@ -53,11 +53,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <aside className="app-sidebar">
       <div className="sidebar-brand">
         <div className="brand-info">
-          <div className="brand-status-dot" />
-          <div>
-            <h2>Temporal Chat Agent</h2>
-            <span className="brand-subtitle">Gemini · SQLite · Tavily</span>
-          </div>
+          <img src="/image.png" alt="Logo" className="sidebar-brand-orb" />
+          <h2>Chat Agent</h2>
         </div>
       </div>
 

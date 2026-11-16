@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { marked } from 'marked';
 import { ChatMessage } from '../types.js';
 import { AgentTrace } from './AgentTrace.js';
@@ -13,6 +14,22 @@ interface ChatAreaProps {
   statusText: string;
   isSidebarOpen: boolean;
   onToggleSidebar: () => void;
+  sessionId?: string;
+  focusTrigger?: number;
+}
+
+const GREETING_PHRASES = [
+  'Ask questions with cross-session memory recall and live web search verification.',
+  'What would you like to explore today?',
+  'Ask anything - I can search the web and recall past conversations.',
+  'Ready to assist with real-time research and temporal memory.',
+  'Ask a question, verify facts, or pick up from an earlier conversation.',
+  'What can I help you find or calculate today?'
+];
+
+function getRandomGreetingPhrase(): string {
+  const idx = Math.floor(Math.random() * GREETING_PHRASES.length);
+  return GREETING_PHRASES[idx];
 }
 
 /**
@@ -142,11 +159,21 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   isLoading,
   statusText,
   isSidebarOpen,
-  onToggleSidebar
+  onToggleSidebar,
+  sessionId,
+  focusTrigger
 }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const inputWrapperRef = useRef<HTMLDivElement>(null);
+  const isTransitioningRef = useRef(false);
+
+  const [transitionStage, setTransitionStage] = useState<'idle' | 'fading-greeting' | 'animating-input'>('idle');
+  const [greetingPhrase, setGreetingPhrase] = useState(() => getRandomGreetingPhrase());
   const [, setMinuteTick] = useState(0);
+
+  // Derive isEmpty: session has zero messages and is not currently running the FLIP slide
+  const isEmpty = messages.length === 0 && transitionStage !== 'animating-input';
 
   // Updates relative time every minute
   useEffect(() => {
@@ -154,15 +181,117 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     return () => clearInterval(interval);
   }, []);
 
+  // Scroll into view on new messages or status changes
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (messages.length > 0) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [messages, statusText]);
+
+  // When session changes or becomes empty (e.g. New Chat), refresh phrase and focus input
+  useEffect(() => {
+    if (messages.length === 0) {
+      setGreetingPhrase(getRandomGreetingPhrase());
+      textareaRef.current?.focus();
+    }
+  }, [sessionId]);
+
+  // Focus input on initial mount
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, []);
+
+  // Refocus input whenever focusTrigger updates
+  useEffect(() => {
+    if (focusTrigger) {
+      textareaRef.current?.focus();
+    }
+  }, [focusTrigger]);
+
+  const handleSend = async () => {
+    const trimmed = input.trim();
+    if (!trimmed || isLoading || isTransitioningRef.current) return;
+
+    // Active session with existing messages: send directly without transition
+    if (messages.length > 0) {
+      setInput('');
+      if (textareaRef.current) textareaRef.current.style.height = 'auto';
+      onSendMessage(trimmed);
+      textareaRef.current?.focus();
+      return;
+    }
+
+    // Check for prefers-reduced-motion
+    const prefersReducedMotion =
+      typeof window !== 'undefined' &&
+      window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    if (prefersReducedMotion) {
+      setInput('');
+      if (textareaRef.current) textareaRef.current.style.height = 'auto';
+      onSendMessage(trimmed);
+      textareaRef.current?.focus();
+      return;
+    }
+
+    // Animated transition from empty state to active state
+    isTransitioningRef.current = true;
+    setInput('');
+    if (textareaRef.current) textareaRef.current.style.height = 'auto';
+
+    // Phase 1: Fade the greeting out (~150ms)
+    setTransitionStage('fading-greeting');
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    // Phase 2: Animate the input card to the bottom (~300ms ease-out via FLIP)
+    const inputEl = inputWrapperRef.current;
+    if (!inputEl) {
+      isTransitioningRef.current = false;
+      setTransitionStage('idle');
+      onSendMessage(trimmed);
+      textareaRef.current?.focus();
+      return;
+    }
+
+    const firstRect = inputEl.getBoundingClientRect();
+
+    // Synchronously render the active layout so input moves to bottom position
+    flushSync(() => {
+      setTransitionStage('animating-input');
+    });
+
+    const lastRect = inputEl.getBoundingClientRect();
+    const deltaY = firstRect.top - lastRect.top;
+
+    if (Math.abs(deltaY) > 0.5) {
+      inputEl.style.transform = `translateY(${deltaY}px)`;
+      inputEl.style.transition = 'none';
+
+      // Force layout reflow
+      void inputEl.offsetHeight;
+
+      inputEl.style.transition = 'transform 300ms cubic-bezier(0.16, 1, 0.3, 1)';
+      inputEl.style.transform = 'translateY(0)';
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      inputEl.style.transform = '';
+      inputEl.style.transition = '';
+    }
+
+    // Phase 3: Transition complete. Dispatch message and refocus
+    isTransitioningRef.current = false;
+    setTransitionStage('idle');
+    onSendMessage(trimmed);
+    textareaRef.current?.focus();
+  };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       if (!isLoading && input.trim()) {
-        onSendMessage(input);
+        handleSend();
       }
     }
   };
@@ -171,7 +300,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     setInput(e.target.value);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 140)}px`;
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 130)}px`;
     }
   };
 
@@ -182,7 +311,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   }, [input]);
 
   return (
-    <main className="chat-container">
+    <main className={`chat-container ${isEmpty ? 'is-empty' : 'is-active'}`}>
       <header className="chat-navbar">
         <div className="navbar-left">
           <button
@@ -200,142 +329,142 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         </div>
       </header>
 
-      <div className="chat-scroll-area">
-        <div className="chat-content-column">
-          {messages.length === 0 && !isLoading && (
-            <div className="chat-empty-state">
-              <div className="empty-icon">⚡</div>
-              <h3>Chat Agent Ready</h3>
-              <p>
-                Ask questions with cross-session memory recall and live web search verification.
-              </p>
-            </div>
-          )}
+      <div className="chat-main-area">
+        <div className="chat-scroll-area">
+          <div className="chat-content-column">
+            {messages.map((msg, idx) => {
+              const showDivider = shouldShowDateDivider(messages, idx);
+              const timeInfo = formatRelativeTime(msg.created_at);
 
-          {messages.map((msg, idx) => {
-            const showDivider = shouldShowDateDivider(messages, idx);
-            const timeInfo = formatRelativeTime(msg.created_at);
-
-            return (
-              <React.Fragment key={idx}>
-                {showDivider && (
-                  <div className="date-divider">
-                    <span>{getDateDividerLabel(msg.created_at)}</span>
-                  </div>
-                )}
-
-                <div className={`message-row ${msg.role}`}>
-                  {msg.role === 'user' ? (
-                    <div className="user-message-card">
-                      <div className="message-header user-header">
-                        <span className="header-label">Me</span>
-                        <span className="header-dot">·</span>
-                        <span className="header-time" title={timeInfo.full}>
-                          {timeInfo.text}
-                        </span>
-                      </div>
-                      <div className="user-text-content">{msg.content}</div>
-                    </div>
-                  ) : (
-                    <div className="assistant-message-block">
-                      <div className="message-header assistant-header">
-                        <span className="header-label">Agent</span>
-                        <span className="header-dot">·</span>
-                        <span className="header-time" title={timeInfo.full}>
-                          {timeInfo.text}
-                        </span>
-                      </div>
-
-                      {msg.trace && <AgentTrace trace={msg.trace} />}
-
-                      <div className="assistant-content">
-                        <div
-                          className="assistant-markdown-bubble markdown-body"
-                          dangerouslySetInnerHTML={{
-                            __html: marked.parse(msg.content, { breaks: true, gfm: true }) as string
-                          }}
-                        />
-                      </div>
-
-                      {!msg._streaming && msg.content && (
-                        <div className="message-actions">
-                          <CopyButton text={msg.content} />
-                        </div>
-                      )}
+              return (
+                <React.Fragment key={idx}>
+                  {showDivider && (
+                    <div className="date-divider">
+                      <span>{getDateDividerLabel(msg.created_at)}</span>
                     </div>
                   )}
-                </div>
-              </React.Fragment>
-            );
-          })}
 
-          {isLoading && statusText && (
-            <div className="agent-status-indicator">
-              <div className="spinner-orbit" />
-              <span className="status-label">{statusText}</span>
-            </div>
-          )}
+                  <div className={`message-row ${msg.role}`}>
+                    {msg.role === 'user' ? (
+                      <div className="user-message-card">
+                        <div className="message-header user-header">
+                          <span className="header-label">Me</span>
+                          <span className="header-dot">·</span>
+                          <span className="header-time" title={timeInfo.full}>
+                            {timeInfo.text}
+                          </span>
+                        </div>
+                        <div className="user-text-content">{msg.content}</div>
+                      </div>
+                    ) : (
+                      <div className="assistant-message-block">
+                        <div className="message-header assistant-header">
+                          <span className="header-label">Agent</span>
+                          <span className="header-dot">·</span>
+                          <span className="header-time" title={timeInfo.full}>
+                            {timeInfo.text}
+                          </span>
+                        </div>
 
-          <div ref={messagesEndRef} />
-        </div>
-      </div>
+                        {msg.trace && <AgentTrace trace={msg.trace} />}
 
-      <footer className="chat-footer">
-        <div className="chat-footer-inner">
-          <form
-            className="input-card"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (isLoading) {
-                onStopExecution?.();
-              } else if (input.trim()) {
-                onSendMessage(input);
-              }
-            }}
-          >
-            <textarea
-              ref={textareaRef}
-              className="chat-textarea"
-              placeholder="Ask anything…"
-              value={input}
-              onChange={handleTextareaChange}
-              onKeyDown={handleKeyDown}
-              rows={1}
-            />
-            <div className="input-card-actions">
-              {isLoading ? (
-                <button
-                  type="button"
-                  className="stop-circle-button"
-                  onClick={onStopExecution}
-                  title="Stop execution"
-                  aria-label="Stop execution"
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-                    <rect x="5" y="5" width="14" height="14" rx="2" />
-                  </svg>
-                </button>
-              ) : (
-                <button
-                  type="submit"
-                  className="send-circle-button"
-                  disabled={!input.trim()}
-                  title="Send message"
-                  aria-label="Send message"
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="12" y1="19" x2="12" y2="5" />
-                    <polyline points="5 12 12 5 19 12" />
-                  </svg>
-                </button>
-              )}
-            </div>
-          </form>
-          <div className="chat-footer-disclaimer">
-            Answers use web search and your earlier chats. Check important facts.
+                        <div className="assistant-content">
+                          <div
+                            className="assistant-markdown-bubble markdown-body"
+                            dangerouslySetInnerHTML={{
+                              __html: marked.parse(msg.content, { breaks: true, gfm: true }) as string
+                            }}
+                          />
+                        </div>
+
+                        {!msg._streaming && msg.content && (
+                          <div className="message-actions">
+                            <CopyButton text={msg.content} />
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </React.Fragment>
+              );
+            })}
+
+            {isLoading && statusText && (
+              <div className="agent-status-indicator">
+                <div className="spinner-orbit" />
+                <span className="status-label">{statusText}</span>
+              </div>
+            )}
+
+            <div ref={messagesEndRef} />
           </div>
         </div>
-      </footer>
+
+        <div className="chat-interactive-zone">
+          <div className="chat-interactive-inner">
+            <div className={`chat-empty-greeting ${transitionStage === 'fading-greeting' ? 'fading-out' : ''}`}>
+              <img src="/image.png" alt="Chat Agent" className="chat-greeting-orb" />
+              <h3>Chat Agent Ready</h3>
+              <p>{greetingPhrase}</p>
+            </div>
+
+            <div className="chat-input-wrapper" ref={inputWrapperRef}>
+              <form
+                className="input-card"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (isLoading) {
+                    onStopExecution?.();
+                  } else if (input.trim()) {
+                    handleSend();
+                  }
+                }}
+              >
+                <textarea
+                  ref={textareaRef}
+                  className="chat-textarea"
+                  placeholder="Ask anything…"
+                  value={input}
+                  onChange={handleTextareaChange}
+                  onKeyDown={handleKeyDown}
+                  rows={1}
+                />
+                <div className="input-card-actions">
+                  {isLoading ? (
+                    <button
+                      type="button"
+                      className="stop-circle-button"
+                      onClick={onStopExecution}
+                      title="Stop execution"
+                      aria-label="Stop execution"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                        <rect x="5" y="5" width="14" height="14" rx="2" />
+                      </svg>
+                    </button>
+                  ) : (
+                    <button
+                      type="submit"
+                      className="send-circle-button"
+                      disabled={!input.trim()}
+                      title="Send message"
+                      aria-label="Send message"
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="12" y1="19" x2="12" y2="5" />
+                        <polyline points="5 12 12 5 19 12" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              </form>
+              <div className="chat-footer-disclaimer">
+                Answers use web search and your earlier chats. Check important facts.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </main>
   );
 };

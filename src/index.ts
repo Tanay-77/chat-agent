@@ -14,6 +14,8 @@ import {
   searchMessagesFTS,
   insertMessage,
   createSession,
+  ensureSession,
+  cleanupEmptySessions,
   getUserSessions,
   getUserSessionsWithSummary,
   getSessionMessages,
@@ -132,6 +134,7 @@ app.use(express.static(path.resolve(process.cwd(), 'public')));
 
 // Check persistent SQLite memory status (fresh DB starts empty)
 console.log('[Server] Checking persistent SQLite memory status...');
+cleanupEmptySessions();
 if (isDatabaseEmpty()) {
   console.log('[Server] Database is empty on boot. Ready for user sessions (or run `npm run seed:demo` to load demo history).');
 } else {
@@ -197,6 +200,9 @@ app.post('/api/chat', async (req: Request, res: Response) => {
   if (!message || typeof message !== 'string' || message.trim().length === 0) {
     return res.status(400).json({ error: 'Field "message" is required and cannot be empty.' });
   }
+
+  // Ensure a session row is created (or existing row reused) scoped to user_id from cookie
+  ensureSession(sessionId, req.userId);
 
   // Configure socket & SSE headers for real-time unbuffered delivery
   req.socket.setNoDelay(true);
@@ -265,13 +271,13 @@ app.post('/api/chat/stop', (req: Request, res: Response) => {
 
 app.post('/api/session/new', (req: Request, res: Response) => {
   try {
-    const session = createSession(req.userId, req.body?.title);
+    const sessionId = `session-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    // Note: No session row is created in DB yet; row is created only when first message arrives
     return res.status(201).json({
       success: true,
-      sessionId: session.id,
-      session_id: session.id,
-      userId: req.userId,
-      createdAt: session.created_at
+      sessionId,
+      session_id: sessionId,
+      userId: req.userId
     });
   } catch (error: any) {
     return res.status(500).json({ error: error.message });

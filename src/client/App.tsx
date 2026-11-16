@@ -9,8 +9,13 @@ export const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [statusText, setStatusText] = useState('');
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [sessionId, setSessionId] = useState('eval-session-live');
+  const [sessionId, setSessionId] = useState(() =>
+    typeof crypto !== 'undefined' && crypto.randomUUID
+      ? `session-${crypto.randomUUID()}`
+      : `session-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`
+  );
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [focusTrigger, setFocusTrigger] = useState(0);
 
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -56,30 +61,23 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleNewChat = async () => {
-    try {
-      setIsLoading(true);
-      setStatusText('Starting new chat session...');
-      const res = await fetch('/api/session/new', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const newSessionId = data.sessionId || data.session_id;
-        setSessionId(newSessionId);
-        setMessages([]);
-        setInput('');
-        await fetchSessions();
-      } else {
-        console.error('Failed to create new session');
-      }
-    } catch (err: any) {
-      console.error('Error creating new session:', err);
-    } finally {
-      setIsLoading(false);
-      setStatusText('');
+  const handleNewChat = () => {
+    // If the current session is already empty (zero messages), New Chat does nothing except refocus the input.
+    if (messages.length === 0) {
+      setFocusTrigger((prev) => prev + 1);
+      return;
     }
+
+    // New Chat only generates a client-side session_id and switches to the empty state. It makes no server call.
+    const newSessionId =
+      typeof crypto !== 'undefined' && crypto.randomUUID
+        ? `session-${crypto.randomUUID()}`
+        : `session-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+
+    setSessionId(newSessionId);
+    setMessages([]);
+    setInput('');
+    setFocusTrigger((prev) => prev + 1);
   };
 
   useEffect(() => {
@@ -89,6 +87,8 @@ export const App: React.FC = () => {
   const handleSendMessage = async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed || isLoading) return;
+
+    const isFirstMessage = messages.length === 0;
 
     setInput('');
     const userCreatedAt = new Date().toISOString();
@@ -115,6 +115,11 @@ export const App: React.FC = () => {
 
       if (!response.body) {
         throw new Error('No readable response body received from server');
+      }
+
+      // After the first message in a session, refresh the sidebar list so the new title appears immediately
+      if (isFirstMessage) {
+        fetchSessions();
       }
 
       const reader = response.body.getReader();
@@ -309,6 +314,8 @@ export const App: React.FC = () => {
         statusText={statusText}
         isSidebarOpen={isSidebarOpen}
         onToggleSidebar={toggleSidebar}
+        sessionId={sessionId}
+        focusTrigger={focusTrigger}
       />
     </div>
   );
