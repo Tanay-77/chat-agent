@@ -30,6 +30,7 @@ import { runAgent, AgentEvent } from './agent/runner.js';
 import { clearSearchCache } from './tools/webSearch.js';
 import { setUserTimezone } from './context/temporalResolver.js';
 import { buildClient } from './client/build.js';
+import { simplifyErrorMessage } from './utils/errorFormatter.js';
 
 // ----------------------------------------------------
 // Signed Cookie Management & User Isolation
@@ -238,7 +239,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('[SSE Server Error]:', error);
-    sendEvent({ type: 'error', error: error?.message || 'Unexpected server error' });
+    sendEvent({ type: 'error', error: simplifyErrorMessage(error) });
     sendEvent({ type: 'done' });
   } finally {
     activeChatAbortControllers.delete(chatKey);

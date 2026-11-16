@@ -3,6 +3,7 @@ import { flushSync } from 'react-dom';
 import { marked } from 'marked';
 import { ChatMessage } from '../types.js';
 import { AgentTrace } from './AgentTrace.js';
+import { formatMessageForDisplay } from '../../utils/errorFormatter.js';
 
 interface ChatAreaProps {
   messages: ChatMessage[];
@@ -372,14 +373,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           <div
                             className="assistant-markdown-bubble markdown-body"
                             dangerouslySetInnerHTML={{
-                              __html: marked.parse(msg.content, { breaks: true, gfm: true }) as string
+                              __html: marked.parse(formatMessageForDisplay(msg.content), { breaks: true, gfm: true }) as string
                             }}
                           />
                         </div>
 
                         {!msg._streaming && msg.content && (
                           <div className="message-actions">
-                            <CopyButton text={msg.content} />
+                            <CopyButton text={formatMessageForDisplay(msg.content)} />
                           </div>
                         )}
                       </div>

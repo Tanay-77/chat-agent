@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { ChatMessage, AgentTraceEvent, SessionSummary } from './types.js';
 import { Sidebar } from './components/Sidebar.js';
 import { ChatArea } from './components/ChatArea.js';
+import { simplifyErrorMessage } from '../utils/errorFormatter.js';
 
 export const App: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -168,13 +169,14 @@ export const App: React.FC = () => {
             currentTrace.push(event);
             setStatusText('');
             if (event.error) {
-              assistantText += `\n\n**Error:** ${event.error}`;
+              const friendlyError = simplifyErrorMessage(event.error);
+              assistantText = assistantText ? `${assistantText}\n\n${friendlyError}` : friendlyError;
               setMessages((prev) => {
                 const last = prev[prev.length - 1];
                 if (last && last.role === 'assistant') {
                   return [
                     ...prev.slice(0, -1),
-                    { ...last, content: assistantText, trace: [...currentTrace] }
+                    { ...last, content: assistantText, trace: [...currentTrace], _streaming: false }
                   ];
                 }
                 return [
@@ -244,11 +246,12 @@ export const App: React.FC = () => {
           ];
         });
       } else {
+        const friendlyError = simplifyErrorMessage(err);
         setMessages((prev) => [
           ...prev,
           {
             role: 'assistant',
-            content: `**Execution Error:** ${err?.message || 'Connection failure'}`,
+            content: friendlyError,
             created_at: new Date().toISOString(),
             trace: currentTrace
           }
