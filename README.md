@@ -1,102 +1,53 @@
-# High-Performance Chat Agent
+# Chat Agent
 
-A high-performance chat agent in TypeScript on Node.js featuring persistent SQLite memory, dynamic temporal context pre-retrieval, batched parallel live web search, and a real-time SSE streaming agent loop powered by Google Gemini.
+A chat agent with one tool (web search) and persistent, date-aware memory of earlier chats.
+It stores conversations in SQLite and pre-retrieves relevant past turns before calling the model.
 
----
+## Requirements
 
-## Prerequisites
-- **Node.js**: `>= 22.13.0` (uses Node's built-in `node:sqlite` module — zero native C++ compiler or `node-gyp` required).
+- Node.js >= 22.13 (uses built-in `node:sqlite`, no native compiler required). Tested on Node v24.13.0.
+- `GEMINI_API_KEY`: Required. Get from Google AI Studio (https://aistudio.google.com).
+- `MODEL_NAME`: Optional. Model name (defaults to `gemini-3.1-flash-lite`).
+- `TAVILY_API_KEY`: Required for web search. Get from Tavily (https://tavily.com).
+- `PORT`: Optional. HTTP server port (defaults to `3000`).
 
----
+## Run it
 
-## Core Components
+1. `npm install`
+2. Copy `.env.example` to `.env` and add your API keys.
+3. `npm run dev`
+4. Open the printed URL (http://localhost:3000).
 
-### 1. SQLite Persistent Memory & Explicit Demo Seeding (`src/db/`)
-- **Store (`src/db/memory.ts`)**: Node's built-in `node:sqlite` (`DatabaseSync`) at `data/chat.db` with WAL mode enabled. No native build dependencies or C++ toolchains (`node-gyp`, Visual Studio) required; installs cleanly and identically across any OS.
-- **Indexes**: Indexed by `session_id`, `date_str` (`YYYY-MM-DD`), `created_at`, and `is_demo`.
-- **FTS5 Virtual Table (`messages_fts`) & Fallback**: Probes for SQLite FTS5 extension support at startup in a disposable in-memory database. When available, uses SQLite FTS5 index over message content with triggers and BM25 relevance ranking. If FTS5 is not compiled into the host SQLite build, it logs a clear warning and seamlessly falls back to a multi-token `LIKE` search over the same date range and `user_id` scope.
-- **Empty Startup**: A fresh database starts completely empty on boot. No fabricated conversations are seeded automatically.
-- **Explicit Demo Seeding (`src/db/seed.ts` / `npm run seed:demo`)**: Demo conversations are moved behind an explicit CLI command and clearly tagged in SQLite with `is_demo = 1` (normal live turns use `is_demo = 0`):
-  - **"3 November"**: Seeded on `${YYYY}-11-03T14:20:00Z` covering Next.js 15.0.1, Node.js v22.11.0 LTS, and Claude 3.5 Sonnet token pricing.
-  - **"Last Tuesday"**: Resolves the previous Tuesday (1–7 days ago), seeding Postgres hosting details across Supabase, Neon, AWS RDS, Render, and Railway.
-  - **"Monday"**: Resolves the most recent Monday (1–7 days ago), seeding a 20-person sales team CRM shortlist (HubSpot, Pipedrive, Attio, Close, Folk).
+The client bundle builds automatically on `npm run dev` via `predev`. The SQLite database starts completely empty (`data/chat.db`).
 
-### 2. Pre-Retrieval Temporal Context Assembler (`src/context/temporalResolver.ts`)
-- **Strictly ONE LLM Tool Rule**: Memory retrieval executes in a deterministic pre-retrieval pipeline **before** the LLM loop.
-- **FTS5 BM25 + Date-Range Retrieval**: Combines date-range filtering with SQLite FTS5 BM25 relevance ranking over sanitized user terms — completely replacing static keyword lists and linear `LIKE '%keyword%'` scans.
-- **Context Budget Capping**: Injected context is prioritized by date relevance and BM25 score, capped to a strict character budget (`MAX_CONTEXT_CHARS`), and formatted with explicit timestamps (`YYYY-MM-DD HH:mm:ss UTC`) for system prompt injection.
+## Try it
 
-### 3. Batched Parallel Web Search Tool (`src/tools/webSearch.ts`)
-- Strictly ONE LLM tool: `web_search`.
-- Accepts `queries: string[]` (1 to 6 concurrent queries executed concurrently via `Promise.all`), `topic?: 'general' | 'news'`, and `days_back?: number`.
-- Connects to Tavily Search API with 8-second request timeout (`AbortController`), retry logic, URL deduplication, and clean snippet extraction.
+- Tell it a fact, then ask in a new chat: send "My favorite color is navy blue", click New Chat, then ask "What is my favorite color?".
+- "What did I ask on 3 November?" on an empty DB (answers that it has no record of that date).
+- "What is the current stable release version of Next.js?" (runs web search for current live version).
+- "What did I ask on 3 November? Is your answer still correct today?" (retrieves memory turn and searches web to verify).
+- "Last Tuesday I asked you about Postgres hosting. Has any pricing changed since then?" (retrieves Tuesday memory and compares current pricing).
 
-### 4. Agent Loop & SSE Streaming API (`src/agent/runner.ts`, `src/index.ts`)
-- **Agent Loop (`src/agent/runner.ts`)**:
-  - Uses `@google/genai` (default: `gemini-3.1-flash-lite`, configurable via `MODEL_NAME`).
-  - Automatically persists user and assistant messages in SQLite.
-  - Generates a 14-day relative calendar mapping in the system prompt so the LLM anchors dates accurately.
-  - **Strict Anti-Fabrication Rule**: If the user refers to a past conversation, question, or shortlist and no matching history was retrieved from SQLite, the agent explicitly states that it has no record of it and asks for details. The agent is strictly prohibited from inventing prior conversation turns.
-  - Executes a multi-turn tool calling loop (up to 4 iterations) emitting real-time event callbacks:
-    - `{ type: 'status', message: '...' }`
-    - `{ type: 'tool_start', queries: [...] }`
-    - `{ type: 'tool_end', resultCount: ..., durationMs: ... }`
-    - `{ type: 'token', content: '...' }` (live streamed answer tokens)
-    - `{ type: 'done' }`
-- **Streaming Endpoints (`src/index.ts`)**:
-  - `POST /api/chat`: Streams real-time updates and response tokens via Server-Sent Events (`text/event-stream`).
-  - `GET /api/history?sessionId=`: Returns conversation history with turns grouped by date (`groupedByDate`) and active session list.
-  - `POST /api/reset`: Clears SQLite memory to a completely empty DB state (0 messages).
-  - `GET /health`: Inspects live database stats (total messages, demo count, sessions), uptime, and configured model.
+## Commands
 
----
+- `npm run dev`: Builds client bundle and starts the development server with file watching.
+- `npm run build`: Bundles the client (`src/client/build.ts`) and compiles TypeScript (`tsc`).
+- `npm test`: Runs test suite (`node:test`) against an in-memory database with mocked APIs.
+- `npm run bench`: Runs latency benchmark suite across all categories and saves metrics to `benchmark/results.json`.
+- `npm run seed:demo`: Populates SQLite with baseline demo sessions (optional, never runs automatically).
 
-## Example prompts
+## Project layout
 
-1. **Evaluation Prompt 1 · CRM Shortlist**:
-   > "On Monday we shortlisted 5 CRM tools for a 20-person sales team. Has any of them changed pricing or shipped something big since?"
+- `src/agent/`: Agent runner, intent routing, and tool-calling loop.
+- `src/context/`: Date resolution (`chrono-node`) and pre-retrieval memory filtering.
+- `src/db/`: SQLite connection (`node:sqlite`), schema, and demo seed script.
+- `src/tools/`: Tavily web search tool with concurrent query execution.
+- `src/client/`: React frontend client and esbuild bundle script.
+- `tests/`: Node test runner suites for dates, memory, policy, and sessions.
+- `scripts/`: Benchmark runner and latency evaluation scripts.
+- `bench/`: Benchmark markdown summaries and raw output data.
 
-2. **Evaluation Prompt 2 · 3 November Versions**:
-   > "What did I ask you on 3 November? Is your answer still correct today?"
+## More
 
-3. **Evaluation Prompt 3 · Postgres Hosting**:
-   > "Last Tuesday I asked you about Postgres hosting. Has any pricing changed since then?"
-
----
-
-## Quick Start
-
-### 1. Install Dependencies
-```bash
-npm install
-```
-
-### 2. Configure Environment (`.env`)
-```env
-GEMINI_API_KEY=your_gemini_api_key_here
-MODEL_NAME=gemini-3.1-flash-lite
-TAVILY_API_KEY=your_tavily_api_key_here
-PORT=3000
-```
-
-### 3. (Optional) Populate Demo Conversations
-By default, the database boots completely empty. To populate the benchmark demo conversations (3 November versions, Last Tuesday Postgres, Monday CRM):
-```bash
-npm run seed:demo
-```
-
-### 4. Run Development Server
-```bash
-npm run dev
-```
-
-### 5. Run Test Suite
-```bash
-npm test
-```
-
-### 6. Build for Production
-```bash
-npm run build
-npm start
-```
+See [DESIGN.md](file:///c:/Tanay%20Programing/chat%20agent/DESIGN.md) for architecture, prompt design, and latency benchmarks.
+Known limitations (Tavily publish dates, snippet-only text, and single-writer SQLite) are documented in [DESIGN.md#known-limitations](file:///c:/Tanay%20Programing/chat%20agent/DESIGN.md#known-limitations).
