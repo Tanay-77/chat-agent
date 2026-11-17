@@ -1,4 +1,4 @@
-# DESIGN.md — Temporal Chat Agent Architecture
+# DESIGN.md - Temporal Chat Agent Architecture
 
 ## 1. Problem
 A chat agent with one tool (`web_search`), evaluated on speed, correctness, and natural conversation.
