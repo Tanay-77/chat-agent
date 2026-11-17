@@ -295,12 +295,22 @@ export function classifyIntent(
   };
 }
 
+export type MockGeminiHandler = (params: {
+  label: string;
+  mode: FunctionCallingConfigMode;
+  allowedFunctionNames?: string[];
+  streamTokens: boolean;
+  contents: any[];
+  systemInstruction?: string;
+}) => Promise<{ text?: string; functionCalls?: any[]; modelContent?: any }>;
+
 export interface RunAgentOptions {
   forceSequentialSearch?: boolean;
   thinkingBudget?: number;
   timezone?: string;
   userId?: string;
   mockSearchResults?: WebSearchResultItem[];
+  mockGeminiCall?: MockGeminiHandler;
   signal?: AbortSignal;
   requestStartTime?: number;
 }
@@ -329,7 +339,7 @@ export async function runAgent(
     return '';
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY || (options.mockGeminiCall ? 'mock-gemini-key' : undefined);
   if (!apiKey) {
     const errorMsg = 'GEMINI_API_KEY is not configured in environment.';
     onEvent({ type: 'error', error: errorMsg });
@@ -420,6 +430,31 @@ export async function runAgent(
     }
     const { label, mode, allowedFunctionNames, streamTokens } = params;
     const callStart = performance.now();
+
+    if (options.mockGeminiCall) {
+      const mockResult = await options.mockGeminiCall({
+        label,
+        mode,
+        allowedFunctionNames,
+        streamTokens,
+        contents,
+        systemInstruction: systemPrompt
+      });
+      const durationMs = Math.round(performance.now() - callStart);
+      const text = mockResult.text || '';
+      if (streamTokens && text) {
+        onEvent({ type: 'token', content: text });
+      }
+      return {
+        text,
+        functionCalls: mockResult.functionCalls || [],
+        modelContent: mockResult.modelContent || (mockResult.functionCalls?.length ? {
+          role: 'model',
+          parts: mockResult.functionCalls.map((fc: any) => ({ functionCall: fc }))
+        } : null),
+        durationMs
+      };
+    }
 
     const functionCallingConfig: any = { mode };
     if (mode === FunctionCallingConfigMode.ANY && allowedFunctionNames) {

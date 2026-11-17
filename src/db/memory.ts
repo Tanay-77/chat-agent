@@ -263,6 +263,10 @@ export function initializeDatabase(targetDb: DatabaseSync): DatabaseSync {
  * Creates and initializes a new DatabaseSync instance (e.g. ':memory:' or a file path).
  */
 export function createDatabase(location: string = DB_PATH): DatabaseSync {
+  const defaultChatDb = path.resolve(process.cwd(), 'data', 'chat.db');
+  if (path.resolve(location) === defaultChatDb && (process.env.NODE_ENV === 'test' || process.env.TEST_DB_PATH === ':memory:')) {
+    throw new Error(`[Test Guard] Attempted to open default production database (${location}) in test environment!`);
+  }
   const instance = new DatabaseSync(location);
   return initializeDatabase(instance);
 }

@@ -16,7 +16,7 @@
     "seed": "tsx src/db/seed.ts",
     "seed:demo": "tsx src/db/seed.ts",
     "bench": "tsx scripts/bench.ts",
-    "test": "tsx src/test.ts"
+    "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@google/genai": "^3.2.0",

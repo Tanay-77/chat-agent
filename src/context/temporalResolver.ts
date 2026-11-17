@@ -376,8 +376,12 @@ export function resolveTemporalContext(
       }
     } else {
       // 2. Keyword (FTS5) fallback is allowed ONLY when NO date was resolved in the message
+      const asksAboutAssistant = /\b(you said|you mentioned|your answer|what did you say|did you say|you recommended|you gave|you suggested|what you said|told me)\b/i.test(userMessage);
       const ftsMessages = searchMessagesFTS(userMessage, { limit: 20, userId });
       for (const msg of ftsMessages) {
+        if (!asksAboutAssistant && msg.role === 'assistant') {
+          continue;
+        }
         const existing = messageMap.get(msg.id);
         const isStrongBm25 = typeof msg.rank === 'number' && msg.rank <= BM25_RELEVANCE_THRESHOLD;
 
@@ -397,6 +401,9 @@ export function resolveTemporalContext(
       if (messageMap.size === 0 && (hasExplicitChatReference || /\b(asked you|we shortlisted|we discussed|shortlisted|remember|my name|who am i|know me)\b/i.test(userMessage))) {
         const recent = getRecentMessages(null, 15, userId);
         for (const msg of recent) {
+          if (!asksAboutAssistant && msg.role === 'assistant') {
+            continue;
+          }
           messageMap.set(msg.id, { ...msg, rank: 0 });
         }
       }
