@@ -18,32 +18,10 @@ export interface Message {
   trace?: PersistedTrace | null;
 }
 
-export interface PersistedTraceSnippet {
-  date: string;
-  role?: string;
-  text: string;
-}
-
-export interface PersistedTraceMemory {
-  found: number;
-  snippets: PersistedTraceSnippet[];
-  dateResolved?: boolean;
-  dateStr?: string;
-  earliestDate?: string;
-  matchType?: 'date' | 'fts' | 'none';
-}
-
-export interface PersistedTraceSearch {
-  queries: number;
-  results: number;
-  ms: number;
-  totalMs?: number;
-}
-
 export interface PersistedTrace {
-  memory?: PersistedTraceMemory | null;
-  search?: PersistedTraceSearch | null;
-  totalMs?: number;
+  usedMemory: boolean;
+  searchResults: number;
+  totalMs: number;
 }
 
 export interface Session {
@@ -120,18 +98,33 @@ export const DB_PATH = process.env.TEST_DB_PATH || path.join(DB_DIR, 'chat.db');
 function formatMessageRow(row: any): Message {
   let parsedTrace: PersistedTrace | null = null;
   if (row.trace) {
+    let obj: any = null;
     if (typeof row.trace === 'string') {
       try {
-        const parsed = JSON.parse(row.trace);
-        if (parsed && (parsed.memory || parsed.search || parsed.totalMs)) {
-          parsedTrace = parsed;
-        }
+        obj = JSON.parse(row.trace);
       } catch {
-        parsedTrace = null;
+        obj = null;
       }
     } else if (typeof row.trace === 'object') {
-      if (row.trace.memory || row.trace.search || row.trace.totalMs) {
-        parsedTrace = row.trace;
+      obj = row.trace;
+    }
+
+    if (obj && typeof obj === 'object') {
+      if (typeof obj.usedMemory === 'boolean' || typeof obj.searchResults === 'number') {
+        const usedMemory = Boolean(obj.usedMemory);
+        const searchResults = Number(obj.searchResults) || 0;
+        const totalMs = Number(obj.totalMs) || 0;
+        if (usedMemory || searchResults > 0) {
+          parsedTrace = { usedMemory, searchResults, totalMs };
+        }
+      } else if (obj.memory || obj.search) {
+        // Drop old stored trace nested structure and convert to simplified shape
+        const usedMemory = Boolean(obj.memory && obj.memory.found > 0);
+        const searchResults = Number(obj.search?.results || 0);
+        const totalMs = Number(obj.totalMs ?? obj.search?.totalMs ?? 0);
+        if (usedMemory || searchResults > 0) {
+          parsedTrace = { usedMemory, searchResults, totalMs };
+        }
       }
     }
   }
@@ -382,18 +375,21 @@ export function insertMessage(
   let traceVal: string | null = null;
   let parsedTrace: PersistedTrace | null = null;
   if (trace) {
+    let p: any = trace;
     if (typeof trace === 'string') {
-      traceVal = trace;
       try {
-        const p = JSON.parse(trace);
-        if (p && (p.memory || p.search || p.totalMs)) parsedTrace = p;
+        p = JSON.parse(trace);
       } catch {
-        parsedTrace = null;
+        p = null;
       }
-    } else if (typeof trace === 'object') {
-      if (trace.memory || trace.search || trace.totalMs) {
-        traceVal = JSON.stringify(trace);
-        parsedTrace = trace;
+    }
+    if (p && typeof p === 'object') {
+      const usedMemory = typeof p.usedMemory === 'boolean' ? p.usedMemory : Boolean(p.memory && p.memory.found > 0);
+      const searchResults = typeof p.searchResults === 'number' ? p.searchResults : Number(p.search?.results || 0);
+      const totalMs = typeof p.totalMs === 'number' ? p.totalMs : Number(p.search?.totalMs || 0);
+      if (usedMemory || searchResults > 0) {
+        parsedTrace = { usedMemory, searchResults, totalMs };
+        traceVal = JSON.stringify(parsedTrace);
       }
     }
   }

@@ -6,10 +6,7 @@ import {
   insertMessage,
   getRecentMessages,
   Message,
-  PersistedTrace,
-  PersistedTraceMemory,
-  PersistedTraceSearch,
-  PersistedTraceSnippet
+  PersistedTrace
 } from '../db/memory.js';
 import {
   resolveTemporalContext,
@@ -325,34 +322,16 @@ export async function runAgent(
   const memoryBlock = temporalRes.formattedContext ? temporalRes.formattedContext.trim() : 'none';
   console.log(`[Agent Runner Request ${sessionId}] Retrieved Memory:\n${memoryBlock}`);
 
-  let memoryTraceObj: PersistedTraceMemory | null = null;
-  if (temporalRes.matchedMessages.length > 0) {
-    memoryTraceObj = {
-      found: temporalRes.matchedMessages.length,
-      snippets: temporalRes.matchedMessages.slice(0, 3).map((m) => {
-        const raw = m.content.trim();
-        const text = raw.length > 80 ? raw.slice(0, 80) : raw;
-        return {
-          date: m.date_str || m.created_at.slice(0, 10),
-          role: m.role,
-          text
-        };
-      }),
-      dateResolved: temporalRes.dateResolved,
-      dateStr: temporalRes.resolvedDateStr,
-      earliestDate: temporalRes.earliestDate,
-      matchType: temporalRes.matchType
+  const usedMemory = temporalRes.matchedMessages.length > 0;
+  const memorySnippets = temporalRes.matchedMessages.slice(0, 3).map((m) => {
+    const raw = m.content.trim();
+    const text = raw.length > 80 ? raw.slice(0, 80) : raw;
+    return {
+      date: m.date_str || m.created_at.slice(0, 10),
+      role: m.role,
+      text
     };
-  } else if (temporalRes.dateResolved) {
-    memoryTraceObj = {
-      found: 0,
-      snippets: [],
-      dateResolved: true,
-      dateStr: temporalRes.resolvedDateStr,
-      earliestDate: temporalRes.earliestDate,
-      matchType: temporalRes.matchType
-    };
-  }
+  });
 
   // Send structured trace event AFTER retrieval finishes with N earlier messages injected into prompt (including N=0)
   onEvent({
@@ -363,7 +342,7 @@ export async function runAgent(
     dateStr: temporalRes.resolvedDateStr,
     earliestDate: temporalRes.earliestDate,
     matchType: temporalRes.matchType,
-    snippets: memoryTraceObj?.snippets || []
+    snippets: memorySnippets
   });
 
   // Insert current user message after resolving historical context so current message is not self-retrieved as past memory
@@ -450,9 +429,13 @@ export async function runAgent(
         const status = apiErr?.status || (String(apiErr?.message).includes('429') ? 429 : String(apiErr?.message).includes('503') ? 503 : 500);
         httpStatus = status;
         const isRetryable = status === 429 || status === 503;
-        if (isRetryable && attempt < 2) {
+        if (isRetryable && attempt < 3) {
           retryCount = attempt + 1;
-          const backoffMs = (attempt + 1) * (status === 429 ? 2500 : 2000);
+          let backoffMs = (attempt + 1) * (status === 429 ? 3000 : 2000);
+          const delayMatch = String(apiErr?.message || '').match(/retry in (\d+(?:\.\d+)?)s/i);
+          if (delayMatch) {
+            backoffMs = Math.ceil(parseFloat(delayMatch[1]) * 1000) + 1000;
+          }
           console.warn(`[Agent Runner ${label}] Gemini API ${status}. Emitting status event and retrying with backoff ${backoffMs}ms...`);
           onEvent({ type: 'status', text: 'Working…', message: 'Working…' });
           await new Promise((r) => setTimeout(r, backoffMs));
@@ -512,30 +495,35 @@ export async function runAgent(
   let totalSearchQueriesCount = 0;
   let turn1Results: WebSearchResultItem[] = [];
   let retryResults: WebSearchResultItem[] = [];
+  let executedSearchQueries: string[] = [];
   let finalAnswer = '';
 
+  function logFullTrace(totalMs: number) {
+    const memSummary = usedMemory
+      ? `${temporalRes.matchedMessages.length} msgs (${temporalRes.matchedMessages.map((m) => `#${m.id}[${m.date_str}]: "${m.content.slice(0, 40).replace(/\r?\n/g, ' ')}"`).join(', ')})`
+      : 'none';
+    const totalResults = turn1Results.length + retryResults.length;
+    const searchSummary = totalSearchCalls > 0
+      ? `${totalResults} results for [${executedSearchQueries.map((q) => `"${q}"`).join(', ')}]`
+      : 'none';
+    const timingsSummary = `pre=${preRetrievalDurationMs}ms, llm1=${stageLlm1Ms}ms, search=${stageSearchMs}ms, llm2=${stageLlm2Ms}ms, total=${totalMs}ms`;
+
+    console.log(`[Trace] Request ${sessionId} | memory: ${memSummary} | search: ${searchSummary} | timings: ${timingsSummary}`);
+  }
+
   function getPersistedTrace(totalMs?: number): PersistedTrace | null {
-    const hasSearch = totalSearchCalls > 0;
     const finalTotalMs = typeof totalMs === 'number'
       ? totalMs
       : Math.round(performance.now() - requestStartTime);
+    const searchResultsCount = turn1Results.length + retryResults.length;
 
-    const searchObj: PersistedTraceSearch | null = hasSearch
-      ? {
-          queries: totalSearchQueriesCount,
-          results: turn1Results.length + retryResults.length,
-          ms: stageSearchMs,
-          totalMs: finalTotalMs
-        }
-      : null;
-
-    if (!memoryTraceObj && !searchObj) {
+    if (!usedMemory && searchResultsCount === 0) {
       return null;
     }
 
     return {
-      memory: memoryTraceObj || null,
-      search: searchObj || null,
+      usedMemory,
+      searchResults: searchResultsCount,
       totalMs: finalTotalMs
     };
   }
@@ -564,6 +552,7 @@ export async function runAgent(
 
     if (options.signal?.aborted) {
       const totalRequestMs = Math.round(performance.now() - requestStartTime);
+      logFullTrace(totalRequestMs);
       if (call1.text) {
         insertMessage(sessionId, 'assistant', call1.text, new Date().toISOString(), null, false, effectiveTz, effectiveUserId, getPersistedTrace(totalRequestMs));
       }
@@ -598,6 +587,7 @@ export async function runAgent(
           const rawArgs = call.args as WebSearchArgs;
           const queries = Array.isArray(rawArgs?.queries) ? rawArgs.queries : [String(rawArgs?.queries || '')];
           totalSearchQueriesCount += queries.length;
+          executedSearchQueries.push(...queries);
           onEvent({ type: 'tool_start', queries });
 
           const searchStart = performance.now();
@@ -689,6 +679,7 @@ export async function runAgent(
               const rawArgs = call.args as WebSearchArgs;
               const queries = Array.isArray(rawArgs?.queries) ? rawArgs.queries : [String(rawArgs?.queries || '')];
               totalSearchQueriesCount += queries.length;
+              executedSearchQueries.push(...queries);
               onEvent({ type: 'tool_start', queries });
 
               const searchStart = performance.now();
@@ -767,6 +758,7 @@ export async function runAgent(
 
       if (options.signal?.aborted) {
         const totalRequestMs = Math.round(performance.now() - requestStartTime);
+        logFullTrace(totalRequestMs);
         if (finalAnswer) {
           insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz, effectiveUserId, getPersistedTrace(totalRequestMs));
         }
@@ -781,6 +773,7 @@ export async function runAgent(
     }
 
     const totalRequestMs = Math.round(performance.now() - requestStartTime);
+    logFullTrace(totalRequestMs);
 
     // Save final assistant response to SQLite
     insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz, effectiveUserId, getPersistedTrace(totalRequestMs));
@@ -794,10 +787,12 @@ export async function runAgent(
     return finalAnswer;
 
   } catch (error: any) {
+    const totalRequestMs = Math.round(performance.now() - requestStartTime);
+    logFullTrace(totalRequestMs);
     console.error('[Agent Runner Error]:', error);
     const errorMsg = simplifyErrorMessage(error);
     onEvent({ type: 'error', error: errorMsg });
-    onEvent({ type: 'done' });
+    onEvent({ type: 'done', totalMs: totalRequestMs });
     return errorMsg;
   }
 }

@@ -1,29 +1,7 @@
-export interface PersistedTraceSnippet {
-  date: string;
-  role?: string;
-  text: string;
-}
-
-export interface PersistedTraceMemory {
-  found: number;
-  snippets: PersistedTraceSnippet[];
-  dateResolved?: boolean;
-  dateStr?: string;
-  earliestDate?: string;
-  matchType?: 'date' | 'fts' | 'none';
-}
-
-export interface PersistedTraceSearch {
-  queries: number;
-  results: number;
-  ms: number;
-  totalMs?: number;
-}
-
 export interface PersistedTrace {
-  memory?: PersistedTraceMemory | null;
-  search?: PersistedTraceSearch | null;
-  totalMs?: number;
+  usedMemory: boolean;
+  searchResults: number;
+  totalMs: number;
 }
 
 export interface ChatMessage {

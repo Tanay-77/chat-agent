@@ -709,88 +709,16 @@
       color: #79b8ff;
     }
 
-    /* Agent Trace Pill */
-    .trace-container { margin: 4px 0 6px; }
-
-    .trace-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      background: #161618;
-      border: 1px solid rgba(255, 255, 255, 0.07);
-      border-radius: 20px;
-      padding: 4px 10px;
-      cursor: pointer;
-      font-size: 11px;
+    /* Agent Trace Static Line */
+    .trace-line {
+      font-size: 13px;
       color: #8a8a90;
-      font-family: var(--font-sans);
-      transition: all 0.15s ease;
-    }
-
-    .trace-pill:hover {
-      background: #1e1e22;
-      color: #ececec;
-      border-color: rgba(255, 255, 255, 0.14);
-    }
-
-    .trace-arrow { font-size: 8px; transition: transform 0.15s ease; display: inline-block; color: #8a8a90; }
-    .trace-arrow.open { transform: rotate(90deg); }
-
-    .trace-details {
-      margin-top: 6px;
-      background: #161618;
-      border: 1px solid rgba(255, 255, 255, 0.07);
-      border-radius: 8px;
-      padding: 10px 12px;
-      font-family: var(--font-sans);
-      font-size: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .trace-memory-header {
-      font-size: 11.5px;
-      font-weight: 500;
-      color: #ececec;
-      margin-bottom: 6px;
-    }
-
-    .trace-snippet-list {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .trace-snippet-item {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      border-radius: 6px;
-      padding: 6px 10px;
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-
-    .trace-snippet-date {
-      font-size: 10px;
-      color: #8a8a90;
-      font-family: var(--font-mono);
-    }
-
-    .trace-snippet-text {
-      color: #c4c4c8;
-      font-size: 12px;
+      background: none;
+      border: none;
+      padding: 0;
+      margin: 2px 0 6px;
       line-height: 1.4;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-
-    .trace-search-info {
-      color: #ececec;
-      font-size: 11.5px;
-      font-family: var(--font-mono);
-      line-height: 1.4;
+      font-family: var(--font-sans);
     }
 
     /* Status Indicator */

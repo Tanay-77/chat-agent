@@ -1544,16 +1544,13 @@ async function runTests() {
     }
 
     const namePillState = computeTracePillState(nameTraceEvents as any);
-    if (!namePillState.shouldRender || namePillState.collapsedText !== 'Used earlier conversation') {
-      throw new Error(`Expected collapsed text "Used earlier conversation", got ${JSON.stringify(namePillState)}`);
+    if (!namePillState.shouldRender || !/^Used memory · \d+\.\d+s$/.test(namePillState.text)) {
+      throw new Error(`Expected text matching "Used memory · X.Xs", got ${JSON.stringify(namePillState)}`);
     }
-    if (namePillState.memorySnippets.length === 0 || !namePillState.memorySnippets[0].text.includes('Tanay')) {
-      throw new Error(`Expected memory snippet in pill state containing "Tanay", got ${JSON.stringify(namePillState)}`);
-    }
-    console.log('  ✓ Case 2 passed: "what\'s my name" shows memory pill with snippet.');
+    console.log(`  ✓ Case 2 passed: "what's my name" shows "${namePillState.text}".`);
 
-    // 13.3 Test: "what's the latest Node.js version" shows only the search pill
-    console.log('  -> Testing Case 3: "what\'s the latest Node.js version" shows only search pill...');
+    // 13.3 Test: "what's the latest Node.js version" shows only the search line
+    console.log('  -> Testing Case 3: "what\'s the latest Node.js version" shows search line...');
     const nodeTestUser = 'user-node-' + Date.now();
     clearDatabase(nodeTestUser);
 
@@ -1597,16 +1594,13 @@ async function runTests() {
     }
 
     const nodePillState = computeTracePillState(nodeEvents as any);
-    if (!nodePillState.shouldRender || nodePillState.collapsedText !== 'Searched the web') {
-      throw new Error(`Expected collapsed text "Searched the web", got ${JSON.stringify(nodePillState)}`);
+    if (!nodePillState.shouldRender || !/^Searched the web · \d+ results · \d+\.\d+s$/.test(nodePillState.text)) {
+      throw new Error(`Expected search line matching "Searched the web · N results · X.Xs", got ${JSON.stringify(nodePillState)}`);
     }
     if (nodePillState.hasMemory !== false || nodePillState.hasSearch !== true) {
       throw new Error(`Expected hasMemory=false, hasSearch=true, got ${JSON.stringify(nodePillState)}`);
     }
-    if (!nodePillState.searchQueries || !nodePillState.searchResults) {
-      throw new Error(`Expected search queries & results in pill state, got ${JSON.stringify(nodePillState)}`);
-    }
-    console.log(`  ✓ Case 3 passed: "what's the latest Node.js version" shows only search pill (${nodePillState.searchQueries} queries · ${nodePillState.searchResults} results · ${nodePillState.searchDurationSec}s).`);
+    console.log(`  ✓ Case 3 passed: "what's the latest Node.js version" shows search line ("${nodePillState.text}").`);
 
     clearDatabase(traceTestUser);
     clearDatabase(nodeTestUser);
@@ -1692,18 +1686,8 @@ async function runTests() {
     }
 
     const nov3Pill = computeTracePillState(nov3Events as any);
-    if (!nov3Pill.shouldRender) {
-      throw new Error('Expected trace pill to render for date resolved zero found');
-    }
-    if (nov3Pill.collapsedText !== 'Checked earlier conversation · nothing on 2026-11-03') {
-      throw new Error(`Expected collapsed text "Checked earlier conversation · nothing on 2026-11-03", got "${nov3Pill.collapsedText}"`);
-    }
-    const expectedExpandedHeader = 'No messages stored for 2026-11-03. Earliest stored message: 2026-11-16.';
-    if (nov3Pill.memoryHeaderText !== expectedExpandedHeader) {
-      throw new Error(`Expected expanded header "${expectedExpandedHeader}", got "${nov3Pill.memoryHeaderText}"`);
-    }
-    if (nov3Pill.memorySnippets.length !== 0) {
-      throw new Error(`Expected 0 snippets in pill state, got ${nov3Pill.memorySnippets.length}`);
+    if (nov3Pill.shouldRender !== false) {
+      throw new Error(`Expected no trace line when 0 messages were injected into prompt, got: ${JSON.stringify(nov3Pill)}`);
     }
 
     const lowerNov3Answer = nov3Answer.toLowerCase();
@@ -1718,7 +1702,7 @@ async function runTests() {
     if (!statesNoRecordNov3) {
       throw new Error(`Expected answer to state no record exists for 3 November, got: "${nov3Answer}"`);
     }
-    console.log('  ✓ Query "what did I ask on 3 November?" successfully showed zero snippets and answered with no record.');
+    console.log('  ✓ Query "what did I ask on 3 November?" correctly showed no trace line (0 messages used) and answered with no record.');
 
     // 14.3 Query "what did I ask yesterday?" with messages on the 16th (today is the 17th) shows them
     console.log('  -> Testing agent run for "what did I ask yesterday?" (yesterday = 2026-11-16)...');
@@ -1740,14 +1724,8 @@ async function runTests() {
     }
 
     const yesterdayPill = computeTracePillState(yesterdayEvents as any);
-    if (!yesterdayPill.shouldRender || yesterdayPill.collapsedText !== 'Used earlier conversation') {
-      throw new Error(`Expected collapsed text "Used earlier conversation", got "${yesterdayPill.collapsedText}"`);
-    }
-    if (!yesterdayPill.memoryHeaderText.includes('from 2026-11-16')) {
-      throw new Error(`Expected memory header to mention "from 2026-11-16", got "${yesterdayPill.memoryHeaderText}"`);
-    }
-    if (yesterdayPill.memorySnippets.length === 0 || !yesterdayPill.memorySnippets.some(s => s.text.includes('CRM tools'))) {
-      throw new Error(`Expected snippets in pill state to show CRM question, got ${JSON.stringify(yesterdayPill.memorySnippets)}`);
+    if (!yesterdayPill.shouldRender || !/^Used memory · \d+\.\d+s$/.test(yesterdayPill.text)) {
+      throw new Error(`Expected trace line matching "Used memory · X.Xs", got "${yesterdayPill.text}"`);
     }
 
     const lowerYesterdayAnswer = yesterdayAnswer.toLowerCase();
@@ -1822,70 +1800,58 @@ async function runTests() {
       throw new Error(`Assistant message should have non-null persisted trace, got: ${JSON.stringify(assistantMsg?.trace)}`);
     }
 
-    // Verify trace contents: memory {found, snippets:[{date, role, text}]}
+    // Verify trace contents: usedMemory, searchResults, totalMs
     const persistedTrace = assistantMsg.trace;
-    if (!persistedTrace.memory || persistedTrace.memory.found < 1) {
-      throw new Error(`Expected trace.memory.found >= 1, got: ${JSON.stringify(persistedTrace.memory)}`);
+    if (persistedTrace.usedMemory !== true) {
+      throw new Error(`Expected trace.usedMemory === true, got: ${JSON.stringify(persistedTrace)}`);
     }
-    if (!Array.isArray(persistedTrace.memory.snippets) || persistedTrace.memory.snippets.length === 0) {
-      throw new Error(`Expected non-empty trace.memory.snippets, got: ${JSON.stringify(persistedTrace.memory.snippets)}`);
-    }
-
-    const firstSnippet = persistedTrace.memory.snippets[0];
-    if (!firstSnippet.date || !firstSnippet.text || !firstSnippet.text.includes('Bluebird')) {
-      throw new Error(`Expected snippet with date and "Bluebird", got: ${JSON.stringify(firstSnippet)}`);
-    }
-    if (firstSnippet.role !== 'user') {
-      throw new Error(`Expected snippet role to be "user", got: "${firstSnippet.role}"`);
-    }
-    if (firstSnippet.text.length > 80) {
-      throw new Error(`Expected snippet text truncated to <= 80 chars, got length ${firstSnippet.text.length}`);
+    if (typeof persistedTrace.totalMs !== 'number' || persistedTrace.totalMs <= 0) {
+      throw new Error(`Expected positive numeric trace.totalMs, got: ${JSON.stringify(persistedTrace)}`);
     }
 
-    // Client pill rendering test with identical content
+    // Client line rendering test with identical content
     const reloadedPill = computeTracePillState(persistedTrace);
-    if (!reloadedPill.shouldRender || reloadedPill.collapsedText !== 'Used earlier conversation') {
-      throw new Error(`Expected pill shouldRender=true with collapsedText="Used earlier conversation", got: ${JSON.stringify(reloadedPill)}`);
+    if (!reloadedPill.shouldRender || !/^Used memory · \d+\.\d+s$/.test(reloadedPill.text)) {
+      throw new Error(`Expected reloaded trace line matching "Used memory · X.Xs", got: ${JSON.stringify(reloadedPill)}`);
     }
-    if (reloadedPill.memorySnippets.length === 0 || !reloadedPill.memorySnippets[0].text.includes('Bluebird')) {
-      throw new Error(`Expected reloaded pill state to have Bluebird snippet, got: ${JSON.stringify(reloadedPill.memorySnippets)}`);
-    }
-    if (!reloadedPill.timingText.startsWith('total ') || !reloadedPill.timingText.endsWith('s')) {
-      throw new Error(`Expected reloaded pill timingText to match "total <X.X>s", got "${reloadedPill.timingText}"`);
-    }
-    console.log(`  ✓ Reloaded message has identical persisted trace with truncated snippets and renders pill (${reloadedPill.timingText}).`);
+    console.log(`  ✓ Reloaded message has identical persisted trace and renders line ("${reloadedPill.text}").`);
 
-    // 15.3b Test search ran timing format: "<N> queries · <N> results · search <X.X>s · total <X.X>s"
-    const searchTraceSample = {
-      search: {
-        queries: 2,
-        results: 9,
-        ms: 1234,
-        totalMs: 6543
-      },
-      totalMs: 6543
-    };
-    const searchPill = computeTracePillState(searchTraceSample);
-    const expectedSearchTiming = '2 queries · 9 results · search 1.2s · total 6.5s';
-    if (searchPill.timingText !== expectedSearchTiming) {
-      throw new Error(`Expected timingText "${expectedSearchTiming}", got "${searchPill.timingText}"`);
-    }
-    console.log(`  ✓ Search timing pill format verified: "${searchPill.timingText}"`);
-
-    // Test no search timing format: "total <X.X>s"
+    // 15.3b Test static line formatting variants:
+    // Memory only: "Used memory · 2.1s"
     const memoryOnlyTrace = {
-      memory: {
-        found: 1,
-        snippets: [{ date: '2026-11-15', role: 'user', text: 'Sample' }]
-      },
-      totalMs: 1820
+      usedMemory: true,
+      searchResults: 0,
+      totalMs: 2100
     };
     const memOnlyPill = computeTracePillState(memoryOnlyTrace);
-    const expectedMemTiming = 'total 1.8s';
-    if (memOnlyPill.timingText !== expectedMemTiming) {
-      throw new Error(`Expected timingText "${expectedMemTiming}", got "${memOnlyPill.timingText}"`);
+    if (memOnlyPill.text !== 'Used memory · 2.1s') {
+      throw new Error(`Expected "Used memory · 2.1s", got "${memOnlyPill.text}"`);
     }
-    console.log(`  ✓ No-search timing pill format verified: "${memOnlyPill.timingText}"`);
+    console.log(`  ✓ Memory only trace line verified: "${memOnlyPill.text}"`);
+
+    // Search only: "Searched the web · 5 results · 6.7s"
+    const searchOnlyTrace = {
+      usedMemory: false,
+      searchResults: 5,
+      totalMs: 6700
+    };
+    const searchOnlyPill = computeTracePillState(searchOnlyTrace);
+    if (searchOnlyPill.text !== 'Searched the web · 5 results · 6.7s') {
+      throw new Error(`Expected "Searched the web · 5 results · 6.7s", got "${searchOnlyPill.text}"`);
+    }
+    console.log(`  ✓ Search only trace line verified: "${searchOnlyPill.text}"`);
+
+    // Both: "Used memory · Searched the web · 6.7s"
+    const bothTrace = {
+      usedMemory: true,
+      searchResults: 5,
+      totalMs: 6700
+    };
+    const bothPill = computeTracePillState(bothTrace);
+    if (bothPill.text !== 'Used memory · Searched the web · 6.7s') {
+      throw new Error(`Expected "Used memory · Searched the web · 6.7s", got "${bothPill.text}"`);
+    }
+    console.log(`  ✓ Both memory and search trace line verified: "${bothPill.text}"`);
 
     // 15.4 Message with no trace returns null and shows no pill
     console.log('  -> Testing message with no trace returns null and shows no pill...');

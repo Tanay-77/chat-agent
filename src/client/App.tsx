@@ -99,11 +99,17 @@ export const App: React.FC = () => {
     setIsLoading(true);
     setStatusText('Resolving temporal context & memory...');
 
-    let liveTrace: PersistedTrace = {};
+    let liveUsedMemory = false;
+    let liveSearchResults = 0;
+    let liveTotalMs = 0;
+
     const getActiveTrace = (): PersistedTrace | null => {
-      const hasMem = Boolean(liveTrace.memory && (liveTrace.memory.found > 0 || liveTrace.memory.dateResolved));
-      const hasSrc = Boolean(liveTrace.search && (liveTrace.search.queries > 0 || liveTrace.search.results > 0 || liveTrace.search.ms > 0));
-      return (hasMem || hasSrc) ? { ...liveTrace } : null;
+      if (!liveUsedMemory && liveSearchResults === 0) return null;
+      return {
+        usedMemory: liveUsedMemory,
+        searchResults: liveSearchResults,
+        totalMs: liveTotalMs
+      };
     };
     let assistantText = '';
     const controller = new AbortController();
@@ -146,38 +152,12 @@ export const App: React.FC = () => {
             setStatusText(event.text || event.message || 'Working…');
           } else if (event.type === 'trace') {
             if (event.step === 'memory') {
-              const snippets = (event.snippets || []).map((s: any) => ({
-                date: s.date,
-                role: s.role,
-                text: s.text
-              }));
-              liveTrace = {
-                ...liveTrace,
-                memory: {
-                  found: event.found ?? 0,
-                  snippets,
-                  dateResolved: event.dateResolved,
-                  dateStr: event.dateStr,
-                  earliestDate: event.earliestDate,
-                  matchType: event.matchType
-                }
-              };
+              if (typeof event.found === 'number' && event.found > 0) {
+                liveUsedMemory = true;
+              }
             } else if (event.step === 'search') {
-              const qCount = typeof event.queries === 'number'
-                ? event.queries
-                : Array.isArray(event.queries)
-                ? event.queries.length
-                : 1;
               const rCount = event.results || event.resultCount || 0;
-              const dMs = event.ms || event.durationMs || 0;
-              liveTrace = {
-                ...liveTrace,
-                search: {
-                  queries: (liveTrace.search?.queries || 0) + qCount,
-                  results: (liveTrace.search?.results || 0) + rCount,
-                  ms: (liveTrace.search?.ms || 0) + dMs
-                }
-              };
+              liveSearchResults += rCount;
             }
           } else if (event.type === 'tool_start') {
             setStatusText('Working…');
@@ -232,11 +212,7 @@ export const App: React.FC = () => {
             }
           } else if (event.type === 'done') {
             if (typeof event.totalMs === 'number') {
-              liveTrace = {
-                ...liveTrace,
-                totalMs: event.totalMs,
-                search: liveTrace.search ? { ...liveTrace.search, totalMs: event.totalMs } : null
-              };
+              liveTotalMs = event.totalMs;
             }
             setStatusText('');
             setMessages((prev) => {
