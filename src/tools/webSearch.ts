@@ -18,6 +18,16 @@ export interface WebSearchResultItem {
   published_date?: string;
   snippet: string;
   note?: string;
+  site_name?: string;
+}
+
+export function extractSiteName(urlStr: string): string {
+  try {
+    const parsed = new URL(urlStr);
+    return parsed.hostname.replace(/^www\./i, '');
+  } catch {
+    return '';
+  }
 }
 
 export interface WebSearchResponse {
@@ -160,14 +170,18 @@ async function fetchTavilySearch(
       const data = await response.json();
       const rawResults = Array.isArray(data.results) ? data.results : [];
 
-      const formatted = rawResults.map((item: any) => ({
-        query,
-        title: (item.title || '').trim(),
-        url: (item.url || '').trim(),
-        published_date: item.published_date || undefined,
-        snippet: (item.content || '').replace(/\s+/g, ' ').trim(),
-        note: TAVILY_PUBLISH_DATE_NOTE
-      }));
+      const formatted = rawResults.map((item: any) => {
+        const url = (item.url || '').trim();
+        return {
+          query,
+          title: (item.title || '').trim(),
+          url,
+          site_name: extractSiteName(url),
+          published_date: item.published_date || undefined,
+          snippet: (item.content || '').replace(/\s+/g, ' ').trim(),
+          note: TAVILY_PUBLISH_DATE_NOTE
+        };
+      });
 
       if (formatted.length > 0) {
         setCachedSearch(cacheKey, formatted);
@@ -259,6 +273,9 @@ export async function executeWebSearch(
       }
       seenUrls.add(item.url);
       item.note = TAVILY_PUBLISH_DATE_NOTE;
+      if (!item.site_name) {
+        item.site_name = extractSiteName(item.url);
+      }
       deduplicated.push(item);
     }
   }

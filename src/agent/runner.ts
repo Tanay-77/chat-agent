@@ -53,6 +53,30 @@ export interface AgentEvent {
   error?: string;
 }
 
+/**
+ * Deduplicates markdown links in text so that no URL is reused more than once.
+ * The first occurrence keeps the full link, while subsequent occurrences retain the link text.
+ */
+export function deduplicateMarkdownLinks(text: string): string {
+  if (!text) return '';
+  const seenUrls = new Set<string>();
+  return text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s\)]+)\)/g, (fullMatch, linkText, url) => {
+    let normalized = url.trim();
+    try {
+      const parsed = new URL(normalized);
+      normalized = (parsed.origin + parsed.pathname).toLowerCase().replace(/\/$/, '');
+    } catch {
+      normalized = normalized.toLowerCase().replace(/\/$/, '');
+    }
+
+    if (seenUrls.has(normalized)) {
+      return linkText;
+    }
+    seenUrls.add(normalized);
+    return fullMatch;
+  });
+}
+
 export type AgentEventCallback = (event: AgentEvent) => void;
 
 /**
@@ -124,11 +148,20 @@ However, user personal context and statements (e.g., the user's name, preference
 2. BATCHED PARALLEL WEB SEARCH:
    - You have strictly ONE tool: \`web_search\`.
    - When asked to verify if any pricing, release version, or feature has changed since a past date, decompose your verification into 1 to 6 targeted, concurrent queries inside a SINGLE \`web_search\` call.
+   - Target authoritative sources directly in your queries (e.g. "site:nodejs.org release", "[vendor] official pricing", "changelog", "release notes"). Avoid targeting generic how-to articles, tutorials, or general blog posts for support status, policies, or release schedules.
    - Include specific vendor/product names, the current year/month, and keywords like "pricing", "plans", "release notes", or "changelog" (e.g., ["HubSpot Sales Hub pricing 2026", "Pipedrive pricing changes", "Attio CRM pricing", "Close CRM plans", "Folk CRM pricing"]).
 
-3. GROUNDING & ANTI-CONTAMINATION (CRITICAL):
+3. GROUNDING, ANTI-CONTAMINATION & CITATION QUALITY (CRITICAL):
    - Retrieved past conversation is what the USER said or what the assistant claimed earlier. It is NOT a source of current facts. Never state a version, price, date or status from past conversation or from model memory. Current facts must come from this turn's search results only.
    - Every version number, price, date, or status in the answer must appear in the search results provided. If results don't contain it or conflict, say so and give what the results do say. Never write a release date that isn't in the results.
+   - Prefer newest dated source: Prefer the newest dated source for versions and prices, and explicitly include its date in your answer (e.g., "released on [YYYY-MM-DD]" or "as of [YYYY-MM-DD]").
+   - Source authority and page relevance: A link must be to a page that actually states that specific claim.
+     * Do NOT use how-to articles, tutorials, or general blog posts to support support-status, policy, or release-schedule claims.
+     * Prefer the official site (e.g. nodejs.org release pages) for software versions, and the company's own official pages for pricing.
+   - Missing claim fallback: If no result states a claim, do NOT link a loosely related page. Either leave the claim out entirely or explicitly say it comes from general knowledge and may be out of date.
+   - Consistency check:
+     * If the answer lists two versions in the same release line, the "current" one must not be older than the other one.
+     * If the sources disagree, say so and cite both with dates.
 
 4. TEMPORAL DIFF & COMPARISON:
    - When checking changes since Date X, perform an explicit TEMPORAL DIFF:
@@ -138,7 +171,10 @@ However, user personal context and statements (e.g., the user's name, preference
      * Be precise with numbers, tiers, and specs.
 
 5. ANSWER FORMAT & CITATIONS:
-   - Cite sources inline, with a link to the specific page for each key claim (not just a homepage), e.g., \`[Source Title](url)\`.
+   - Cite sources inline, with a link to the specific page for each key claim (not just a homepage).
+   - Link format: Put one link on the key phrase of the claim it supports, using the source's site name as the link text, e.g. "Node.js 26.13.0 ([nodejs.org](url))".
+   - Link limits: Max one link per claim and about 3-4 links per answer.
+   - Don't reuse the same URL more than once.
    - Be direct, concise, and structured. Avoid lengthy conversational filler or generic preambles.
    - For comparisons, prioritize compact Markdown tables and high-density bullet points so the user gets facts immediately.
 
@@ -562,7 +598,7 @@ export async function runAgent(
 
     if (call1.functionCalls.length === 0) {
       // Direct text answer (no tool call was needed)
-      finalAnswer = call1.text;
+      finalAnswer = deduplicateMarkdownLinks(call1.text);
       console.log(`[Agent Runner Request ${sessionId}] Top 5 Search Results: none`);
     } else {
       // Model called web_search
@@ -754,7 +790,7 @@ export async function runAgent(
       });
 
       stageLlm2Ms = synthesisCall.durationMs;
-      finalAnswer = synthesisCall.text;
+      finalAnswer = deduplicateMarkdownLinks(synthesisCall.text);
 
       if (options.signal?.aborted) {
         const totalRequestMs = Math.round(performance.now() - requestStartTime);
@@ -770,6 +806,8 @@ export async function runAgent(
     if (!finalAnswer) {
       finalAnswer = 'Completed search verification with available context.';
       onEvent({ type: 'token', content: finalAnswer });
+    } else {
+      finalAnswer = deduplicateMarkdownLinks(finalAnswer);
     }
 
     const totalRequestMs = Math.round(performance.now() - requestStartTime);

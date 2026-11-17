@@ -26,10 +26,11 @@ import {
   executeWebSearch,
   computeEffectiveStartDate,
   TAVILY_PUBLISH_DATE_NOTE,
-  WebSearchResultItem
+  WebSearchResultItem,
+  extractSiteName
 } from './tools/webSearch.js';
 import { FunctionCallingConfigMode } from '@google/genai';
-import { buildCalendarReference, buildSystemPrompt, runAgent, AgentEvent, classifyIntent } from './agent/runner.js';
+import { buildCalendarReference, buildSystemPrompt, runAgent, AgentEvent, classifyIntent, deduplicateMarkdownLinks } from './agent/runner.js';
 import { computeTracePillState } from './client/components/AgentTrace.js';
 import app, { signCookieValue, unsignCookieValue, parseCookies, USER_COOKIE_NAME } from './index.js';
 
@@ -506,7 +507,47 @@ async function runTests() {
   if (!prompt.includes('Cite sources inline, with a link to the specific page')) {
     throw new Error('System prompt missing inline source citation instruction');
   }
-  console.log('Calendar reference & system prompt generation verified.');
+  if (!prompt.includes("source's site name as the link text")) {
+    throw new Error('System prompt missing site name as link text instruction');
+  }
+  if (!prompt.includes("Max one link per claim and about 3-4 links per answer")) {
+    throw new Error('System prompt missing max links per answer instruction');
+  }
+  if (!prompt.includes("Don't reuse the same URL more than once")) {
+    throw new Error('System prompt missing no URL reuse instruction');
+  }
+  if (!prompt.includes("Do NOT use how-to articles, tutorials, or general blog posts")) {
+    throw new Error('System prompt missing authoritative sources instruction');
+  }
+  if (!prompt.includes("Prefer the official site (e.g. nodejs.org release pages) for software versions, and the company's own official pages for pricing")) {
+    throw new Error('System prompt missing official pages preference instruction');
+  }
+  if (!prompt.includes("If no result states a claim, do NOT link a loosely related page")) {
+    throw new Error('System prompt missing missing-claim fallback instruction');
+  }
+  if (!prompt.includes('the "current" one must not be older than the other one')) {
+    throw new Error('System prompt missing version line consistency check instruction');
+  }
+  if (!prompt.includes('If the sources disagree, say so and cite both with dates')) {
+    throw new Error('System prompt missing conflicting sources instruction');
+  }
+  if (!prompt.includes('Prefer the newest dated source for versions and prices, and explicitly include its date')) {
+    throw new Error('System prompt missing newest dated source instruction');
+  }
+
+  // Verify site name extraction and markdown link deduplication
+  if (extractSiteName('https://nodejs.org/en/blog/release/v26.13.0') !== 'nodejs.org') {
+    throw new Error('extractSiteName failed for nodejs.org');
+  }
+  if (extractSiteName('https://www.hubspot.com/pricing') !== 'hubspot.com') {
+    throw new Error('extractSiteName failed for www.hubspot.com');
+  }
+  const sampleDup = 'Check Node.js 26.13.0 ([nodejs.org](https://nodejs.org/release)) and V8 ([nodejs.org](https://nodejs.org/release)).';
+  const dedupResult = deduplicateMarkdownLinks(sampleDup);
+  if (dedupResult !== 'Check Node.js 26.13.0 ([nodejs.org](https://nodejs.org/release)) and V8 (nodejs.org).') {
+    throw new Error(`deduplicateMarkdownLinks failed, got: "${dedupResult}"`);
+  }
+  console.log('Calendar reference & system prompt generation verified (including 5 citation quality rules & link deduplication).');
 
   // 4. Web Search Tool Schema Tests
   console.log('\n[4/7] Testing Web Search Tool Schema...');
