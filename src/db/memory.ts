@@ -15,6 +15,33 @@ export interface Message {
   keywords?: string | null; // Note: Deprecated. Column retained for schema compatibility, replaced by messages_fts FTS5 table.
   is_demo: number;
   rank?: number; // SQLite FTS5 BM25 score (or negative relevance score when retrieved via fallback search)
+  trace?: PersistedTrace | null;
+}
+
+export interface PersistedTraceSnippet {
+  date: string;
+  role?: string;
+  text: string;
+}
+
+export interface PersistedTraceMemory {
+  found: number;
+  snippets: PersistedTraceSnippet[];
+  dateResolved?: boolean;
+  dateStr?: string;
+  earliestDate?: string;
+  matchType?: 'date' | 'fts' | 'none';
+}
+
+export interface PersistedTraceSearch {
+  queries: number;
+  results: number;
+  ms: number;
+}
+
+export interface PersistedTrace {
+  memory?: PersistedTraceMemory | null;
+  search?: PersistedTraceSearch | null;
 }
 
 export interface Session {
@@ -89,6 +116,24 @@ export const DB_PATH = process.env.TEST_DB_PATH || path.join(DB_DIR, 'chat.db');
  * bigints from node:sqlite are safely converted to numbers.
  */
 function formatMessageRow(row: any): Message {
+  let parsedTrace: PersistedTrace | null = null;
+  if (row.trace) {
+    if (typeof row.trace === 'string') {
+      try {
+        const parsed = JSON.parse(row.trace);
+        if (parsed && (parsed.memory || parsed.search)) {
+          parsedTrace = parsed;
+        }
+      } catch {
+        parsedTrace = null;
+      }
+    } else if (typeof row.trace === 'object') {
+      if (row.trace.memory || row.trace.search) {
+        parsedTrace = row.trace;
+      }
+    }
+  }
+
   return {
     id: Number(row.id),
     user_id: String(row.user_id),
@@ -99,7 +144,8 @@ function formatMessageRow(row: any): Message {
     date_str: String(row.date_str),
     keywords: row.keywords ? String(row.keywords) : null,
     is_demo: Number(row.is_demo),
-    rank: typeof row.rank === 'number' ? row.rank : (row.rank !== undefined && row.rank !== null ? Number(row.rank) : undefined)
+    rank: typeof row.rank === 'number' ? row.rank : (row.rank !== undefined && row.rank !== null ? Number(row.rank) : undefined),
+    trace: parsedTrace
   };
 }
 
@@ -123,7 +169,8 @@ export function initializeDatabase(targetDb: DatabaseSync): DatabaseSync {
       created_at TEXT NOT NULL,
       date_str TEXT NOT NULL,
       keywords TEXT,
-      is_demo INTEGER NOT NULL DEFAULT 0
+      is_demo INTEGER NOT NULL DEFAULT 0,
+      trace TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
@@ -196,6 +243,13 @@ export function initializeDatabase(targetDb: DatabaseSync): DatabaseSync {
     targetDb.exec('CREATE INDEX IF NOT EXISTS idx_messages_is_demo ON messages(is_demo);');
   } catch {
     // Index already exists
+  }
+
+  // Migration safeguard for existing databases: trace column (nullable JSON string)
+  try {
+    targetDb.exec('ALTER TABLE messages ADD COLUMN trace TEXT;');
+  } catch {
+    // Column already exists
   }
 
   // Migration: Backfill existing rows into FTS5 index if available
@@ -294,7 +348,8 @@ export function insertMessage(
   keywords?: string | null,
   isDemo: boolean = false,
   timezone?: string,
-  userId: string = 'default-user'
+  userId: string = 'default-user',
+  trace?: PersistedTrace | string | null
 ): Message {
   // Ensure a session row is created (or existing row reused) scoped to userId
   createSession(userId, null, sessionId);
@@ -322,9 +377,28 @@ export function insertMessage(
   const finalKeywords = keywords ? keywords.trim() : null;
   const isDemoVal = isDemo ? 1 : 0;
 
+  let traceVal: string | null = null;
+  let parsedTrace: PersistedTrace | null = null;
+  if (trace) {
+    if (typeof trace === 'string') {
+      traceVal = trace;
+      try {
+        const p = JSON.parse(trace);
+        if (p && (p.memory || p.search)) parsedTrace = p;
+      } catch {
+        parsedTrace = null;
+      }
+    } else if (typeof trace === 'object') {
+      if (trace.memory || trace.search) {
+        traceVal = JSON.stringify(trace);
+        parsedTrace = trace;
+      }
+    }
+  }
+
   const stmt = db.prepare(`
-    INSERT INTO messages (user_id, session_id, role, content, created_at, date_str, keywords, is_demo)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (user_id, session_id, role, content, created_at, date_str, keywords, is_demo, trace)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = stmt.run(
@@ -335,7 +409,8 @@ export function insertMessage(
     finalCreatedAt,
     finalDateStr,
     finalKeywords,
-    isDemoVal
+    isDemoVal,
+    traceVal
   );
 
   return {
@@ -347,7 +422,8 @@ export function insertMessage(
     created_at: finalCreatedAt,
     date_str: finalDateStr,
     keywords: finalKeywords,
-    is_demo: isDemoVal
+    is_demo: isDemoVal,
+    trace: parsedTrace
   };
 }
 
@@ -365,7 +441,7 @@ export function getRecentMessages(
   if (isWildcard) {
     const stmt = db.prepare(`
       SELECT * FROM (
-        SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo
+        SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo, trace
         FROM messages
         WHERE user_id = ?
         ORDER BY created_at DESC, id DESC
@@ -377,7 +453,7 @@ export function getRecentMessages(
 
   const stmt = db.prepare(`
     SELECT * FROM (
-      SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo
+      SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo, trace
       FROM messages
       WHERE user_id = ? AND session_id = ?
       ORDER BY created_at DESC, id DESC
@@ -404,7 +480,7 @@ export function searchMessagesByDateRange(
 
   if (isWildcard) {
     const stmt = db.prepare(`
-      SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo
+      SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo, trace
       FROM messages
       WHERE user_id = ? AND date_str >= ? AND date_str <= ?
       ORDER BY created_at ASC, id ASC
@@ -413,7 +489,7 @@ export function searchMessagesByDateRange(
   }
 
   const stmt = db.prepare(`
-    SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo
+    SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo, trace
     FROM messages
     WHERE user_id = ? AND session_id = ? AND date_str >= ? AND date_str <= ?
     ORDER BY created_at ASC, id ASC
@@ -506,7 +582,7 @@ export function searchMessagesFTS(
 
       const whereClause = `WHERE ${conditions.join(' AND ')}`;
       const sql = `
-        SELECT m.id, m.user_id, m.session_id, m.role, m.content, m.created_at, m.date_str, m.keywords, m.is_demo,
+        SELECT m.id, m.user_id, m.session_id, m.role, m.content, m.created_at, m.date_str, m.keywords, m.is_demo, m.trace,
                -0.5 as rank
         FROM messages m
         ${whereClause}
@@ -519,7 +595,7 @@ export function searchMessagesFTS(
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
     const sql = `
-      SELECT m.id, m.user_id, m.session_id, m.role, m.content, m.created_at, m.date_str, m.keywords, m.is_demo,
+      SELECT m.id, m.user_id, m.session_id, m.role, m.content, m.created_at, m.date_str, m.keywords, m.is_demo, m.trace,
              0 as rank
       FROM messages m
       ${whereClause}
@@ -538,7 +614,7 @@ export function searchMessagesFTS(
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const sql = `
-      SELECT m.id, m.user_id, m.session_id, m.role, m.content, m.created_at, m.date_str, m.keywords, m.is_demo,
+      SELECT m.id, m.user_id, m.session_id, m.role, m.content, m.created_at, m.date_str, m.keywords, m.is_demo, m.trace,
              bm25(messages_fts) as rank
       FROM messages m
       JOIN messages_fts f ON m.id = f.rowid
@@ -554,7 +630,7 @@ export function searchMessagesFTS(
   if (conditions.length > 0) {
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
     const sql = `
-      SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo, 0 as rank
+      SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo, trace, 0 as rank
       FROM messages m
       ${whereClause}
       ORDER BY created_at ASC
@@ -587,7 +663,7 @@ export function isDatabaseEmpty(userId?: string): boolean {
 export function getAllMessages(limit: number = 500, userId?: string): Message[] {
   if (userId) {
     const stmt = db.prepare(`
-      SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo
+      SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo, trace
       FROM messages
       WHERE user_id = ?
       ORDER BY created_at ASC, id ASC
@@ -597,7 +673,7 @@ export function getAllMessages(limit: number = 500, userId?: string): Message[] 
   }
 
   const stmt = db.prepare(`
-    SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo
+    SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo, trace
     FROM messages
     ORDER BY created_at ASC, id ASC
     LIMIT ?
@@ -727,7 +803,7 @@ export function getSessionMessages(sessionId: string, userId: string = 'default-
   }
 
   const stmt = db.prepare(`
-    SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo
+    SELECT id, user_id, session_id, role, content, created_at, date_str, keywords, is_demo, trace
     FROM messages
     WHERE session_id = ? AND user_id = ?
     ORDER BY created_at ASC, id ASC

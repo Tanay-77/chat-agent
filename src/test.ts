@@ -1758,6 +1758,134 @@ async function runTests() {
 
     clearDatabase(dateFallbackUser);
 
+    // ----------------------------------------------------
+    // 15. Testing Trace Persistence Across Reload & API
+    // ----------------------------------------------------
+    console.log('\n[15/15] Testing Trace Persistence Across Reload & API...');
+    const reloadTestUser = 'user-reload-' + Date.now();
+    const reloadCookie = signCookieValue(reloadTestUser);
+    clearDatabase(reloadTestUser);
+
+    // 15.1 Seed past memory
+    insertMessage(
+      'session-seed-bluebird',
+      'user',
+      'My secret project codename is Project Bluebird which focuses on autonomous avionics.',
+      '2026-11-15T10:00:00Z',
+      null,
+      false,
+      'UTC',
+      reloadTestUser
+    );
+    insertMessage(
+      'session-seed-bluebird',
+      'assistant',
+      'Recorded secret codename Project Bluebird.',
+      '2026-11-15T10:01:00Z',
+      null,
+      false,
+      'UTC',
+      reloadTestUser
+    );
+
+    // 15.2 Send message that triggers memory in a new session
+    console.log('  -> Sending message triggering memory in session-reload-test...');
+    await runAgent(
+      'What is my secret project codename?',
+      'session-reload-test',
+      () => {},
+      testToday17,
+      { userId: reloadTestUser }
+    );
+
+    // 15.3 Reload: fetch messages via HTTP GET /api/sessions/:id/messages
+    console.log('  -> Testing HTTP GET /api/sessions/session-reload-test/messages returns persisted trace...');
+    const reloadHttpRes = await fetch(`${baseUrl}/api/sessions/session-reload-test/messages`, {
+      headers: { Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(reloadCookie)}` }
+    });
+    if (!reloadHttpRes.ok) {
+      throw new Error(`HTTP GET messages failed with status ${reloadHttpRes.status}`);
+    }
+    const sessionMsgs: any[] = await reloadHttpRes.json();
+    if (sessionMsgs.length < 2) {
+      throw new Error(`Expected at least 2 messages in session, got ${sessionMsgs.length}`);
+    }
+
+    const userMsg = sessionMsgs.find((m) => m.role === 'user');
+    const assistantMsg = sessionMsgs.find((m) => m.role === 'assistant');
+
+    if (!userMsg || userMsg.trace !== null) {
+      throw new Error(`User message should have trace === null, got: ${JSON.stringify(userMsg?.trace)}`);
+    }
+
+    if (!assistantMsg || !assistantMsg.trace) {
+      throw new Error(`Assistant message should have non-null persisted trace, got: ${JSON.stringify(assistantMsg?.trace)}`);
+    }
+
+    // Verify trace contents: memory {found, snippets:[{date, role, text}]}
+    const persistedTrace = assistantMsg.trace;
+    if (!persistedTrace.memory || persistedTrace.memory.found < 1) {
+      throw new Error(`Expected trace.memory.found >= 1, got: ${JSON.stringify(persistedTrace.memory)}`);
+    }
+    if (!Array.isArray(persistedTrace.memory.snippets) || persistedTrace.memory.snippets.length === 0) {
+      throw new Error(`Expected non-empty trace.memory.snippets, got: ${JSON.stringify(persistedTrace.memory.snippets)}`);
+    }
+
+    const firstSnippet = persistedTrace.memory.snippets[0];
+    if (!firstSnippet.date || !firstSnippet.text || !firstSnippet.text.includes('Bluebird')) {
+      throw new Error(`Expected snippet with date and "Bluebird", got: ${JSON.stringify(firstSnippet)}`);
+    }
+    if (firstSnippet.role !== 'user') {
+      throw new Error(`Expected snippet role to be "user", got: "${firstSnippet.role}"`);
+    }
+    if (firstSnippet.text.length > 80) {
+      throw new Error(`Expected snippet text truncated to <= 80 chars, got length ${firstSnippet.text.length}`);
+    }
+
+    // Client pill rendering test with identical content
+    const reloadedPill = computeTracePillState(persistedTrace);
+    if (!reloadedPill.shouldRender || reloadedPill.collapsedText !== 'Used earlier conversation') {
+      throw new Error(`Expected pill shouldRender=true with collapsedText="Used earlier conversation", got: ${JSON.stringify(reloadedPill)}`);
+    }
+    if (reloadedPill.memorySnippets.length === 0 || !reloadedPill.memorySnippets[0].text.includes('Bluebird')) {
+      throw new Error(`Expected reloaded pill state to have Bluebird snippet, got: ${JSON.stringify(reloadedPill.memorySnippets)}`);
+    }
+    console.log('  ✓ Reloaded message has identical persisted trace with truncated snippets and renders pill.');
+
+    // 15.4 Message with no trace returns null and shows no pill
+    console.log('  -> Testing message with no trace returns null and shows no pill...');
+    await runAgent(
+      'hi',
+      'session-no-trace',
+      () => {},
+      testToday17,
+      { userId: reloadTestUser }
+    );
+    const noTraceHttpRes = await fetch(`${baseUrl}/api/sessions/session-no-trace/messages`, {
+      headers: { Cookie: `${USER_COOKIE_NAME}=${encodeURIComponent(reloadCookie)}` }
+    });
+    const noTraceMsgs: any[] = await noTraceHttpRes.json();
+    const noTraceAssistant = noTraceMsgs.find((m) => m.role === 'assistant');
+    if (!noTraceAssistant) {
+      throw new Error('Expected assistant message in session-no-trace');
+    }
+    if (noTraceAssistant.trace !== null) {
+      throw new Error(`Expected assistant message with no trace to return null, got: ${JSON.stringify(noTraceAssistant.trace)}`);
+    }
+    const noTracePill = computeTracePillState(noTraceAssistant.trace);
+    if (noTracePill.shouldRender !== false) {
+      throw new Error(`Expected shouldRender=false for null trace, got: ${JSON.stringify(noTracePill)}`);
+    }
+    console.log('  ✓ Message with no trace returns null and shows no pill.');
+
+    // 15.5 Clear All Memory deletes trace with messages
+    clearDatabase(reloadTestUser);
+    const postClearMsgs = getSessionMessages('session-reload-test', reloadTestUser);
+    if (postClearMsgs !== null && postClearMsgs.length > 0) {
+      throw new Error(`Expected cleared database to return 0 messages, got ${postClearMsgs?.length}`);
+    }
+    console.log('  ✓ Clear All Memory deletes trace along with messages.');
+
   } finally {
     testServer.close();
     clearDatabase(userAlpha);
@@ -1765,7 +1893,7 @@ async function runTests() {
   }
   console.log('  ✓ Test server closed and database cleaned.');
 
-  console.log('\nAll 14 test suites passed successfully!');
+  console.log('\nAll 15 test suites passed successfully!');
 }
 
 runTests().catch((err) => {

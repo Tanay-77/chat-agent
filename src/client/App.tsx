@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ChatMessage, AgentTraceEvent, SessionSummary } from './types.js';
+import { ChatMessage, AgentTraceEvent, SessionSummary, PersistedTrace } from './types.js';
 import { Sidebar } from './components/Sidebar.js';
 import { ChatArea } from './components/ChatArea.js';
 import { simplifyErrorMessage } from '../utils/errorFormatter.js';
@@ -45,9 +45,11 @@ export const App: React.FC = () => {
         const rawMsgs = Array.isArray(data) ? data : data.messages || [];
         setMessages(
           rawMsgs.map((m: any) => ({
+            id: m.id,
             role: m.role,
             content: m.content,
-            created_at: m.created_at
+            created_at: m.created_at,
+            trace: m.trace ?? null
           }))
         );
         setSessionId(selectedId);
@@ -93,11 +95,16 @@ export const App: React.FC = () => {
 
     setInput('');
     const userCreatedAt = new Date().toISOString();
-    setMessages((prev) => [...prev, { role: 'user', content: trimmed, created_at: userCreatedAt }]);
+    setMessages((prev) => [...prev, { role: 'user', content: trimmed, created_at: userCreatedAt, trace: null }]);
     setIsLoading(true);
     setStatusText('Resolving temporal context & memory...');
 
-    const currentTrace: AgentTraceEvent[] = [];
+    let liveTrace: PersistedTrace = {};
+    const getActiveTrace = (): PersistedTrace | null => {
+      const hasMem = Boolean(liveTrace.memory && (liveTrace.memory.found > 0 || liveTrace.memory.dateResolved));
+      const hasSrc = Boolean(liveTrace.search && (liveTrace.search.queries > 0 || liveTrace.search.results > 0 || liveTrace.search.ms > 0));
+      return (hasMem || hasSrc) ? { ...liveTrace } : null;
+    };
     let assistantText = '';
     const controller = new AbortController();
     abortControllerRef.current = controller;
@@ -138,7 +145,40 @@ export const App: React.FC = () => {
           if (event.type === 'status') {
             setStatusText(event.text || event.message || 'Working…');
           } else if (event.type === 'trace') {
-            currentTrace.push(event);
+            if (event.step === 'memory') {
+              const snippets = (event.snippets || []).map((s: any) => ({
+                date: s.date,
+                role: s.role,
+                text: s.text
+              }));
+              liveTrace = {
+                ...liveTrace,
+                memory: {
+                  found: event.found ?? 0,
+                  snippets,
+                  dateResolved: event.dateResolved,
+                  dateStr: event.dateStr,
+                  earliestDate: event.earliestDate,
+                  matchType: event.matchType
+                }
+              };
+            } else if (event.step === 'search') {
+              const qCount = typeof event.queries === 'number'
+                ? event.queries
+                : Array.isArray(event.queries)
+                ? event.queries.length
+                : 1;
+              const rCount = event.results || event.resultCount || 0;
+              const dMs = event.ms || event.durationMs || 0;
+              liveTrace = {
+                ...liveTrace,
+                search: {
+                  queries: (liveTrace.search?.queries || 0) + qCount,
+                  results: (liveTrace.search?.results || 0) + rCount,
+                  ms: (liveTrace.search?.ms || 0) + dMs
+                }
+              };
+            }
           } else if (event.type === 'tool_start') {
             setStatusText('Working…');
           } else if (event.type === 'tool_end') {
@@ -151,7 +191,7 @@ export const App: React.FC = () => {
               if (last && last.role === 'assistant' && last._streaming) {
                 return [
                   ...prev.slice(0, -1),
-                  { ...last, content: assistantText, trace: [...currentTrace] }
+                  { ...last, content: assistantText, trace: getActiveTrace() }
                 ];
               }
               return [
@@ -160,13 +200,12 @@ export const App: React.FC = () => {
                   role: 'assistant',
                   content: assistantText,
                   created_at: new Date().toISOString(),
-                  trace: [...currentTrace],
+                  trace: getActiveTrace(),
                   _streaming: true
                 }
               ];
             });
           } else if (event.type === 'error') {
-            currentTrace.push(event);
             setStatusText('');
             if (event.error) {
               const friendlyError = simplifyErrorMessage(event.error);
@@ -176,7 +215,7 @@ export const App: React.FC = () => {
                 if (last && last.role === 'assistant') {
                   return [
                     ...prev.slice(0, -1),
-                    { ...last, content: assistantText, trace: [...currentTrace], _streaming: false }
+                    { ...last, content: assistantText, trace: getActiveTrace(), _streaming: false }
                   ];
                 }
                 return [
@@ -185,7 +224,7 @@ export const App: React.FC = () => {
                     role: 'assistant',
                     content: assistantText,
                     created_at: new Date().toISOString(),
-                    trace: [...currentTrace],
+                    trace: getActiveTrace(),
                     _streaming: false
                   }
                 ];
@@ -197,7 +236,7 @@ export const App: React.FC = () => {
               const last = prev[prev.length - 1];
               if (last && last.role === 'assistant') {
                 const { _streaming, ...clean } = last;
-                return [...prev.slice(0, -1), { ...clean, created_at: clean.created_at || new Date().toISOString(), trace: [...currentTrace] }];
+                return [...prev.slice(0, -1), { ...clean, created_at: clean.created_at || new Date().toISOString(), trace: getActiveTrace() }];
               }
               return prev;
             });
@@ -233,7 +272,7 @@ export const App: React.FC = () => {
             const content = clean.content
               ? `${clean.content}\n\n*[Execution stopped]*`
               : '*[Execution stopped]*';
-            return [...prev.slice(0, -1), { ...clean, content, created_at: clean.created_at || new Date().toISOString(), trace: [...currentTrace] }];
+            return [...prev.slice(0, -1), { ...clean, content, created_at: clean.created_at || new Date().toISOString(), trace: getActiveTrace() }];
           }
           return [
             ...prev,
@@ -241,7 +280,7 @@ export const App: React.FC = () => {
               role: 'assistant',
               content: '*[Execution stopped]*',
               created_at: new Date().toISOString(),
-              trace: currentTrace
+              trace: getActiveTrace()
             }
           ];
         });
@@ -253,7 +292,7 @@ export const App: React.FC = () => {
             role: 'assistant',
             content: friendlyError,
             created_at: new Date().toISOString(),
-            trace: currentTrace
+            trace: getActiveTrace()
           }
         ]);
       }

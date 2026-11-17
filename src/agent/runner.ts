@@ -5,7 +5,11 @@ import { GoogleGenAI, FunctionCallingConfigMode } from '@google/genai';
 import {
   insertMessage,
   getRecentMessages,
-  Message
+  Message,
+  PersistedTrace,
+  PersistedTraceMemory,
+  PersistedTraceSearch,
+  PersistedTraceSnippet
 } from '../db/memory.js';
 import {
   resolveTemporalContext,
@@ -317,6 +321,35 @@ export async function runAgent(
   const memoryBlock = temporalRes.formattedContext ? temporalRes.formattedContext.trim() : 'none';
   console.log(`[Agent Runner Request ${sessionId}] Retrieved Memory:\n${memoryBlock}`);
 
+  let memoryTraceObj: PersistedTraceMemory | null = null;
+  if (temporalRes.matchedMessages.length > 0) {
+    memoryTraceObj = {
+      found: temporalRes.matchedMessages.length,
+      snippets: temporalRes.matchedMessages.slice(0, 3).map((m) => {
+        const raw = m.content.trim();
+        const text = raw.length > 80 ? raw.slice(0, 80) : raw;
+        return {
+          date: m.date_str || m.created_at.slice(0, 10),
+          role: m.role,
+          text
+        };
+      }),
+      dateResolved: temporalRes.dateResolved,
+      dateStr: temporalRes.resolvedDateStr,
+      earliestDate: temporalRes.earliestDate,
+      matchType: temporalRes.matchType
+    };
+  } else if (temporalRes.dateResolved) {
+    memoryTraceObj = {
+      found: 0,
+      snippets: [],
+      dateResolved: true,
+      dateStr: temporalRes.resolvedDateStr,
+      earliestDate: temporalRes.earliestDate,
+      matchType: temporalRes.matchType
+    };
+  }
+
   // Send structured trace event AFTER retrieval finishes with N earlier messages injected into prompt (including N=0)
   onEvent({
     type: 'trace',
@@ -326,10 +359,7 @@ export async function runAgent(
     dateStr: temporalRes.resolvedDateStr,
     earliestDate: temporalRes.earliestDate,
     matchType: temporalRes.matchType,
-    snippets: temporalRes.matchedMessages.slice(0, 3).map((m) => ({
-      date: m.date_str || m.created_at.slice(0, 10),
-      text: m.content
-    }))
+    snippets: memoryTraceObj?.snippets || []
   });
 
   // Insert current user message after resolving historical context so current message is not self-retrieved as past memory
@@ -475,7 +505,30 @@ export async function runAgent(
   let stageSearchMs = 0;
   let stageLlm2Ms = 0;
   let totalSearchCalls = 0;
+  let totalSearchQueriesCount = 0;
+  let turn1Results: WebSearchResultItem[] = [];
+  let retryResults: WebSearchResultItem[] = [];
   let finalAnswer = '';
+
+  function getPersistedTrace(): PersistedTrace | null {
+    const hasSearch = totalSearchCalls > 0;
+    const searchObj: PersistedTraceSearch | null = hasSearch
+      ? {
+          queries: totalSearchQueriesCount,
+          results: turn1Results.length + retryResults.length,
+          ms: stageSearchMs
+        }
+      : null;
+
+    if (!memoryTraceObj && !searchObj) {
+      return null;
+    }
+
+    return {
+      memory: memoryTraceObj || null,
+      search: searchObj || null
+    };
+  }
 
   try {
     // ─── Turn 1: Search Dispatch (or direct answer if no-search) ───
@@ -501,7 +554,7 @@ export async function runAgent(
 
     if (options.signal?.aborted) {
       if (call1.text) {
-        insertMessage(sessionId, 'assistant', call1.text, new Date().toISOString(), null, false, effectiveTz, effectiveUserId);
+        insertMessage(sessionId, 'assistant', call1.text, new Date().toISOString(), null, false, effectiveTz, effectiveUserId, getPersistedTrace());
       }
       onEvent({ type: 'done' });
       return call1.text;
@@ -522,8 +575,8 @@ export async function runAgent(
         });
       }
 
-      let turn1Results: WebSearchResultItem[] = [];
-      let retryResults: WebSearchResultItem[] = [];
+      turn1Results = [];
+      retryResults = [];
       const responseParts: any[] = [];
       const effectiveSearchStartDate = temporalRes.searchWindow?.startDate;
 
@@ -533,6 +586,7 @@ export async function runAgent(
           totalSearchCalls++;
           const rawArgs = call.args as WebSearchArgs;
           const queries = Array.isArray(rawArgs?.queries) ? rawArgs.queries : [String(rawArgs?.queries || '')];
+          totalSearchQueriesCount += queries.length;
           onEvent({ type: 'tool_start', queries });
 
           const searchStart = performance.now();
@@ -623,6 +677,7 @@ export async function runAgent(
               totalSearchCalls++;
               const rawArgs = call.args as WebSearchArgs;
               const queries = Array.isArray(rawArgs?.queries) ? rawArgs.queries : [String(rawArgs?.queries || '')];
+              totalSearchQueriesCount += queries.length;
               onEvent({ type: 'tool_start', queries });
 
               const searchStart = performance.now();
@@ -701,7 +756,7 @@ export async function runAgent(
 
       if (options.signal?.aborted) {
         if (finalAnswer) {
-          insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz, effectiveUserId);
+          insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz, effectiveUserId, getPersistedTrace());
         }
         onEvent({ type: 'done' });
         return finalAnswer;
@@ -714,7 +769,7 @@ export async function runAgent(
     }
 
     // Save final assistant response to SQLite
-    insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz, effectiveUserId);
+    insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz, effectiveUserId, getPersistedTrace());
     onEvent({ type: 'done' });
 
     // Print per-request stage breakdown

@@ -1,8 +1,35 @@
+export interface PersistedTraceSnippet {
+  date: string;
+  role?: string;
+  text: string;
+}
+
+export interface PersistedTraceMemory {
+  found: number;
+  snippets: PersistedTraceSnippet[];
+  dateResolved?: boolean;
+  dateStr?: string;
+  earliestDate?: string;
+  matchType?: 'date' | 'fts' | 'none';
+}
+
+export interface PersistedTraceSearch {
+  queries: number;
+  results: number;
+  ms: number;
+}
+
+export interface PersistedTrace {
+  memory?: PersistedTraceMemory | null;
+  search?: PersistedTraceSearch | null;
+}
+
 export interface ChatMessage {
+  id?: number;
   role: 'user' | 'assistant';
   content: string;
   created_at?: string;
-  trace?: AgentTraceEvent[];
+  trace?: PersistedTrace | null;
   _streaming?: boolean;
 }
 
@@ -14,7 +41,7 @@ export interface AgentTraceEvent {
   dateStr?: string;
   earliestDate?: string;
   matchType?: 'date' | 'fts' | 'none';
-  snippets?: Array<{ date: string; text: string }>;
+  snippets?: Array<{ date: string; role?: string; text: string }>;
   queries?: number | string[];
   results?: number;
   ms?: number;
