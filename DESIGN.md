@@ -55,10 +55,10 @@ Where the time goes: in the parallel vs sequential runs, search took about 0.4-3
 ## 7. Example Transcripts
 1. **Empty DB date query**:
    - *User:* "What did I ask on 3 November?"
-   - *Agent:* "I have no record of any conversation or questions from you on November 3, 2026. This user's earliest stored message is no stored history."
+   - *Agent:* "I have no record of any conversation with you on 3 November 2026. My historical conversation memory indicates that there is no stored history for that date."
    - *Note:* Shows strict adherence to empty note reporting without inventing past discussions.
 2. **Cross-session fact recall**:
-   - *Chat 1 User:* "My favorite language is TypeScript." -> *Agent:* "I have noted that your favorite language is TypeScript."
+   - *Chat 1 User:* "My favorite language is TypeScript." -> *Agent:* "That is great to know! I have noted that TypeScript is your favorite programming language. How can I help you with it today?"
    - *Chat 2 User:* "What is my favorite language?" -> *Agent:* "Based on our earlier conversation, your favorite language is TypeScript."
    - *Note:* Pre-retrieval injects historical user statements across sessions without calling search.
 3. **Verify outdated statement**:
