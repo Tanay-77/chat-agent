@@ -1850,7 +1850,42 @@ async function runTests() {
     if (reloadedPill.memorySnippets.length === 0 || !reloadedPill.memorySnippets[0].text.includes('Bluebird')) {
       throw new Error(`Expected reloaded pill state to have Bluebird snippet, got: ${JSON.stringify(reloadedPill.memorySnippets)}`);
     }
-    console.log('  ✓ Reloaded message has identical persisted trace with truncated snippets and renders pill.');
+    if (!reloadedPill.timingText.startsWith('total ') || !reloadedPill.timingText.endsWith('s')) {
+      throw new Error(`Expected reloaded pill timingText to match "total <X.X>s", got "${reloadedPill.timingText}"`);
+    }
+    console.log(`  ✓ Reloaded message has identical persisted trace with truncated snippets and renders pill (${reloadedPill.timingText}).`);
+
+    // 15.3b Test search ran timing format: "<N> queries · <N> results · search <X.X>s · total <X.X>s"
+    const searchTraceSample = {
+      search: {
+        queries: 2,
+        results: 9,
+        ms: 1234,
+        totalMs: 6543
+      },
+      totalMs: 6543
+    };
+    const searchPill = computeTracePillState(searchTraceSample);
+    const expectedSearchTiming = '2 queries · 9 results · search 1.2s · total 6.5s';
+    if (searchPill.timingText !== expectedSearchTiming) {
+      throw new Error(`Expected timingText "${expectedSearchTiming}", got "${searchPill.timingText}"`);
+    }
+    console.log(`  ✓ Search timing pill format verified: "${searchPill.timingText}"`);
+
+    // Test no search timing format: "total <X.X>s"
+    const memoryOnlyTrace = {
+      memory: {
+        found: 1,
+        snippets: [{ date: '2026-11-15', role: 'user', text: 'Sample' }]
+      },
+      totalMs: 1820
+    };
+    const memOnlyPill = computeTracePillState(memoryOnlyTrace);
+    const expectedMemTiming = 'total 1.8s';
+    if (memOnlyPill.timingText !== expectedMemTiming) {
+      throw new Error(`Expected timingText "${expectedMemTiming}", got "${memOnlyPill.timingText}"`);
+    }
+    console.log(`  ✓ No-search timing pill format verified: "${memOnlyPill.timingText}"`);
 
     // 15.4 Message with no trace returns null and shows no pill
     console.log('  -> Testing message with no trace returns null and shows no pill...');

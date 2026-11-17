@@ -16,18 +16,22 @@ export interface TracePillState {
   searchQueries: number;
   searchResults: number;
   searchDurationSec: string;
+  totalDurationSec: string;
+  timingText: string;
 }
 
 export function normalizeTrace(trace?: PersistedTrace | AgentTraceEvent[] | null): PersistedTrace | null {
   if (!trace) return null;
   if (!Array.isArray(trace)) {
-    if (!trace.memory && !trace.search) return null;
+    if (!trace.memory && !trace.search && !trace.totalMs) return null;
     return trace;
   }
 
   // Backward compatibility: If an array of AgentTraceEvent is passed
   const memoryEvent = trace.find((e) => e.type === 'trace' && e.step === 'memory');
   const searchEvents = trace.filter((e) => e.type === 'trace' && e.step === 'search');
+  const doneEvent = trace.find((e) => e.type === 'done');
+  const timingEvent = trace.find((e) => e.type === 'trace' && typeof e.totalMs === 'number');
 
   let memory = null;
   if (memoryEvent) {
@@ -64,8 +68,10 @@ export function normalizeTrace(trace?: PersistedTrace | AgentTraceEvent[] | null
     };
   }
 
-  if (!memory && !search) return null;
-  return { memory, search };
+  const totalMs = doneEvent?.totalMs ?? timingEvent?.totalMs;
+
+  if (!memory && !search && !totalMs) return null;
+  return { memory, search, totalMs };
 }
 
 export function computeTracePillState(rawTrace?: PersistedTrace | AgentTraceEvent[] | null): TracePillState {
@@ -82,7 +88,9 @@ export function computeTracePillState(rawTrace?: PersistedTrace | AgentTraceEven
       memoryHeaderText: '',
       searchQueries: 0,
       searchResults: 0,
-      searchDurationSec: '0.0'
+      searchDurationSec: '0.0',
+      totalDurationSec: '0.0',
+      timingText: ''
     };
   }
 
@@ -113,7 +121,9 @@ export function computeTracePillState(rawTrace?: PersistedTrace | AgentTraceEven
       memoryHeaderText: '',
       searchQueries: 0,
       searchResults: 0,
-      searchDurationSec: '0.0'
+      searchDurationSec: '0.0',
+      totalDurationSec: '0.0',
+      timingText: ''
     };
   }
 
@@ -148,7 +158,17 @@ export function computeTracePillState(rawTrace?: PersistedTrace | AgentTraceEven
   const searchQueries = search?.queries || 0;
   const searchResults = search?.results || 0;
   const searchMs = search?.ms || 0;
-  const durationSec = (searchMs / 1000).toFixed(1);
+  const totalMs = trace.totalMs ?? search?.totalMs ?? (hasSearch ? searchMs : 0);
+
+  const searchDurationSec = (searchMs / 1000).toFixed(1);
+  const totalDurationSec = (totalMs / 1000).toFixed(1);
+
+  let timingText = '';
+  if (hasSearch) {
+    timingText = `${searchQueries} queries · ${searchResults} results · search ${searchDurationSec}s · total ${totalDurationSec}s`;
+  } else if (totalMs > 0) {
+    timingText = `total ${totalDurationSec}s`;
+  }
 
   return {
     shouldRender: true,
@@ -160,7 +180,9 @@ export function computeTracePillState(rawTrace?: PersistedTrace | AgentTraceEven
     memoryHeaderText,
     searchQueries,
     searchResults,
-    searchDurationSec: durationSec
+    searchDurationSec,
+    totalDurationSec,
+    timingText
   };
 }
 
@@ -207,10 +229,10 @@ export const AgentTrace: React.FC<AgentTraceProps> = ({ trace }) => {
             </div>
           )}
 
-          {state.hasSearch && (
+          {Boolean(state.timingText) && (
             <div className="trace-search-block">
               <div className="trace-search-info">
-                {state.searchQueries} queries · {state.searchResults} results · {state.searchDurationSec}s
+                {state.timingText}
               </div>
             </div>
           )}

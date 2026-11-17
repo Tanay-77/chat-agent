@@ -47,6 +47,7 @@ export interface AgentEvent {
   queries?: number | string[];
   results?: number;
   ms?: number;
+  totalMs?: number;
   resultCount?: number;
   durationMs?: number;
   text?: string;
@@ -268,6 +269,7 @@ export interface RunAgentOptions {
   userId?: string;
   mockSearchResults?: WebSearchResultItem[];
   signal?: AbortSignal;
+  requestStartTime?: number;
 }
 
 /**
@@ -285,7 +287,9 @@ export async function runAgent(
   refDate: Date = new Date(),
   options: RunAgentOptions = {}
 ): Promise<string> {
-  const requestStartTime = performance.now();
+  const requestStartTime = typeof options.requestStartTime === 'number'
+    ? options.requestStartTime
+    : performance.now();
 
   if (options.signal?.aborted) {
     onEvent({ type: 'done' });
@@ -510,13 +514,18 @@ export async function runAgent(
   let retryResults: WebSearchResultItem[] = [];
   let finalAnswer = '';
 
-  function getPersistedTrace(): PersistedTrace | null {
+  function getPersistedTrace(totalMs?: number): PersistedTrace | null {
     const hasSearch = totalSearchCalls > 0;
+    const finalTotalMs = typeof totalMs === 'number'
+      ? totalMs
+      : Math.round(performance.now() - requestStartTime);
+
     const searchObj: PersistedTraceSearch | null = hasSearch
       ? {
           queries: totalSearchQueriesCount,
           results: turn1Results.length + retryResults.length,
-          ms: stageSearchMs
+          ms: stageSearchMs,
+          totalMs: finalTotalMs
         }
       : null;
 
@@ -526,7 +535,8 @@ export async function runAgent(
 
     return {
       memory: memoryTraceObj || null,
-      search: searchObj || null
+      search: searchObj || null,
+      totalMs: finalTotalMs
     };
   }
 
@@ -553,10 +563,11 @@ export async function runAgent(
     stageLlm1Ms = call1.durationMs;
 
     if (options.signal?.aborted) {
+      const totalRequestMs = Math.round(performance.now() - requestStartTime);
       if (call1.text) {
-        insertMessage(sessionId, 'assistant', call1.text, new Date().toISOString(), null, false, effectiveTz, effectiveUserId, getPersistedTrace());
+        insertMessage(sessionId, 'assistant', call1.text, new Date().toISOString(), null, false, effectiveTz, effectiveUserId, getPersistedTrace(totalRequestMs));
       }
-      onEvent({ type: 'done' });
+      onEvent({ type: 'done', totalMs: totalRequestMs });
       return call1.text;
     }
 
@@ -755,10 +766,11 @@ export async function runAgent(
       finalAnswer = synthesisCall.text;
 
       if (options.signal?.aborted) {
+        const totalRequestMs = Math.round(performance.now() - requestStartTime);
         if (finalAnswer) {
-          insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz, effectiveUserId, getPersistedTrace());
+          insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz, effectiveUserId, getPersistedTrace(totalRequestMs));
         }
-        onEvent({ type: 'done' });
+        onEvent({ type: 'done', totalMs: totalRequestMs });
         return finalAnswer;
       }
     }
@@ -768,12 +780,13 @@ export async function runAgent(
       onEvent({ type: 'token', content: finalAnswer });
     }
 
+    const totalRequestMs = Math.round(performance.now() - requestStartTime);
+
     // Save final assistant response to SQLite
-    insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz, effectiveUserId, getPersistedTrace());
-    onEvent({ type: 'done' });
+    insertMessage(sessionId, 'assistant', finalAnswer, new Date().toISOString(), null, false, effectiveTz, effectiveUserId, getPersistedTrace(totalRequestMs));
+    onEvent({ type: 'done', totalMs: totalRequestMs });
 
     // Print per-request stage breakdown
-    const totalRequestMs = Math.round(performance.now() - requestStartTime);
     console.log(
       `[Agent Runner Stage Breakdown] Request ID: ${sessionId} | Pre-retrieval: ${preRetrievalDurationMs}ms | LLM call 1: ${stageLlm1Ms}ms | Search: ${stageSearchMs}ms | LLM call 2: ${stageLlm2Ms}ms | Total: ${totalRequestMs}ms`
     );

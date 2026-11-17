@@ -231,6 +231,13 @@ export const App: React.FC = () => {
               });
             }
           } else if (event.type === 'done') {
+            if (typeof event.totalMs === 'number') {
+              liveTrace = {
+                ...liveTrace,
+                totalMs: event.totalMs,
+                search: liveTrace.search ? { ...liveTrace.search, totalMs: event.totalMs } : null
+              };
+            }
             setStatusText('');
             setMessages((prev) => {
               const last = prev[prev.length - 1];

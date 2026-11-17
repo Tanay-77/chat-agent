@@ -17,11 +17,13 @@ export interface PersistedTraceSearch {
   queries: number;
   results: number;
   ms: number;
+  totalMs?: number;
 }
 
 export interface PersistedTrace {
   memory?: PersistedTraceMemory | null;
   search?: PersistedTraceSearch | null;
+  totalMs?: number;
 }
 
 export interface ChatMessage {
@@ -45,6 +47,7 @@ export interface AgentTraceEvent {
   queries?: number | string[];
   results?: number;
   ms?: number;
+  totalMs?: number;
   resultCount?: number;
   durationMs?: number;
   text?: string;

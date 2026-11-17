@@ -37,11 +37,13 @@ export interface PersistedTraceSearch {
   queries: number;
   results: number;
   ms: number;
+  totalMs?: number;
 }
 
 export interface PersistedTrace {
   memory?: PersistedTraceMemory | null;
   search?: PersistedTraceSearch | null;
+  totalMs?: number;
 }
 
 export interface Session {
@@ -121,14 +123,14 @@ function formatMessageRow(row: any): Message {
     if (typeof row.trace === 'string') {
       try {
         const parsed = JSON.parse(row.trace);
-        if (parsed && (parsed.memory || parsed.search)) {
+        if (parsed && (parsed.memory || parsed.search || parsed.totalMs)) {
           parsedTrace = parsed;
         }
       } catch {
         parsedTrace = null;
       }
     } else if (typeof row.trace === 'object') {
-      if (row.trace.memory || row.trace.search) {
+      if (row.trace.memory || row.trace.search || row.trace.totalMs) {
         parsedTrace = row.trace;
       }
     }
@@ -384,12 +386,12 @@ export function insertMessage(
       traceVal = trace;
       try {
         const p = JSON.parse(trace);
-        if (p && (p.memory || p.search)) parsedTrace = p;
+        if (p && (p.memory || p.search || p.totalMs)) parsedTrace = p;
       } catch {
         parsedTrace = null;
       }
     } else if (typeof trace === 'object') {
-      if (trace.memory || trace.search) {
+      if (trace.memory || trace.search || trace.totalMs) {
         traceVal = JSON.stringify(trace);
         parsedTrace = trace;
       }

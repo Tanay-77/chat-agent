@@ -229,13 +229,16 @@ app.post('/api/chat', async (req: Request, res: Response) => {
     res.write(`data: ${JSON.stringify(event)}\n\n`);
   };
 
+  const requestStartTime = performance.now();
+
   try {
     await runAgent(message.trim(), sessionId, sendEvent, new Date(), {
       forceSequentialSearch,
       thinkingBudget,
       timezone: clientTimezone,
       userId: req.userId,
-      signal: abortController.signal
+      signal: abortController.signal,
+      requestStartTime
     });
   } catch (error: any) {
     console.error('[SSE Server Error]:', error);
