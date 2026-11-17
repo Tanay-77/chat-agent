@@ -35,9 +35,12 @@ All numbers are cold runs (search cache cleared per request). Samples are small,
 Single cold runs, n=2 each: an answer with no search took about 2.6 s total (2,666 ms and 2,557 ms). An answer with one search took about 4.2-4.5 s total (4,195 ms and 4,519 ms).
 
 Parallel vs sequential search inside one tool call (same 3-CRM pricing prompt, n=5 each):
+
 | | Search median (range) | TTFT median (range) | Total median (range) |
+| :--- | :--- | :--- | :--- |
 | Parallel | 613 ms (410-3,379) | 7,237 ms (4,291-9,320) | 9,885 ms (7,086-11,794) |
 | Sequential | 922 ms (920-1,040) | 4,549 ms (4,170-5,846) | 7,281 ms (6,695-8,347) |
+
 The search ranges overlap, so there is no reliable difference at the search stage. End to end, parallel was slower in this run. Parallel ran first and sequential second, so drifting Gemini latency may account for part of the gap. Both modes made one tool call. I did not benchmark the real alternative, one query per tool call (N model turns), so batching is chosen by reasoning (it avoids N model round trips), not by measurement.
 
 Thinking budget (minimal vs default, n=2 each, different prompts): no measurable difference at this sample size.
