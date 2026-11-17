@@ -15,7 +15,10 @@ import {
   getUserSessionsWithSummary,
   getSessionMessages,
   formatSessionTitle,
-  cleanupEmptySessions
+  cleanupEmptySessions,
+  probeFTS5,
+  setFTS5AvailableForTesting,
+  transaction
 } from './db/memory.js';
 import { resolveTemporalContext, MAX_CONTEXT_CHARS, parseDates, formatDateInTz, setUserTimezone } from './context/temporalResolver.js';
 import {
@@ -65,12 +68,52 @@ async function runTests() {
   const novRange = searchMessagesByDateRange(null, '2026-11-01', '2026-11-05');
   if (novRange.length !== 2) throw new Error('Date range query failed');
 
-  // FTS5 BM25 search
+  // Probe FTS5 detection
+  const isFtsSupported = probeFTS5();
+  if (typeof isFtsSupported !== 'boolean') {
+    throw new Error(`Expected probeFTS5() to return boolean, got ${typeof isFtsSupported}`);
+  }
+
+  // 1a. Test FTS5 path (probe result mocked to true)
+  setFTS5AvailableForTesting(true);
   const postgresFts = searchMessagesFTS('Postgres hosting options');
   if (postgresFts.length < 2) throw new Error('FTS5 search for Postgres failed');
   if (typeof postgresFts[0].rank !== 'number' || postgresFts[0].rank >= 0) {
     throw new Error('FTS5 BM25 ranking should return negative score');
   }
+
+  // 1b. Test LIKE search fallback path (probe result mocked to false)
+  setFTS5AvailableForTesting(false);
+  const postgresLike = searchMessagesFTS('Postgres hosting options');
+  if (postgresLike.length < 2) throw new Error('LIKE fallback search for Postgres failed');
+  if (!postgresLike.some(m => m.content.includes('Postgres'))) {
+    throw new Error('LIKE fallback search did not return Postgres message');
+  }
+  if (typeof postgresLike[0].rank !== 'number' || postgresLike[0].rank >= 0) {
+    throw new Error('LIKE fallback search ranking should return negative score');
+  }
+
+  // Reset FTS5 override to default detection
+  setFTS5AvailableForTesting(null);
+
+  // Test transaction helper: commit and rollback
+  transaction(() => {
+    insertMessage('test-tx-session', 'user', 'Transaction committed turn');
+  });
+  const txMsg = db.prepare('SELECT * FROM messages WHERE session_id = ?').get('test-tx-session');
+  if (!txMsg) throw new Error('Transaction helper failed to commit message');
+  db.prepare('DELETE FROM messages WHERE session_id = ?').run('test-tx-session');
+
+  try {
+    transaction(() => {
+      insertMessage('test-tx-rollback', 'user', 'Should be rolled back');
+      throw new Error('Forced rollback');
+    });
+  } catch {
+    // Expected rollback error
+  }
+  const rolledBackMsg = db.prepare('SELECT * FROM messages WHERE session_id = ?').get('test-tx-rollback');
+  if (rolledBackMsg) throw new Error('Transaction helper failed to rollback message on error');
 
   const recent = getRecentMessages('session-monday-crm', 10);
   if (recent.length !== 2) throw new Error('Recent messages query failed');
@@ -91,21 +134,21 @@ async function runTests() {
 
   // Query 1: Monday CRM shortlist
   const q1 = "On Monday we shortlisted 5 CRM tools for a 20-person sales team. Has any of them changed pricing or shipped something big since?";
-  const res1 = resolveTemporalContext(q1, 'session-test-1');
+  const res1 = resolveTemporalContext(q1, 'session-test-1', now);
   if (res1.matchedMessages.length < 2 || !res1.matchedMessages.some(m => m.content.includes('HubSpot Sales Hub'))) {
     throw new Error('Temporal resolution for Monday CRM query failed');
   }
 
   // Query 2: 3 November
   const q2 = "What did I ask you on 3 November? Is your answer still correct today?";
-  const res2 = resolveTemporalContext(q2, 'session-test-2');
+  const res2 = resolveTemporalContext(q2, 'session-test-2', now);
   if (res2.matchedMessages.length < 2 || !res2.matchedMessages.some(m => m.content.includes('Next.js 15.0.1'))) {
     throw new Error('Temporal resolution for 3 November query failed');
   }
 
   // Query 3: Last Tuesday Postgres
   const q3 = "Last Tuesday I asked you about Postgres hosting. Has any pricing changed since then?";
-  const res3 = resolveTemporalContext(q3, 'session-test-3');
+  const res3 = resolveTemporalContext(q3, 'session-test-3', now);
   if (res3.matchedMessages.length < 2 || !res3.matchedMessages.some(m => m.content.includes('Supabase'))) {
     throw new Error('Temporal resolution for Last Tuesday query failed');
   }

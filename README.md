@@ -4,12 +4,17 @@ A high-performance chat agent in TypeScript on Node.js featuring persistent SQLi
 
 ---
 
+## Prerequisites
+- **Node.js**: `>= 22.13.0` (uses Node's built-in `node:sqlite` module — zero native C++ compiler or `node-gyp` required).
+
+---
+
 ## Core Components
 
 ### 1. SQLite Persistent Memory & Explicit Demo Seeding (`src/db/`)
-- **Store (`src/db/memory.ts`)**: `better-sqlite3` at `data/chat.db` with WAL mode enabled.
+- **Store (`src/db/memory.ts`)**: Node's built-in `node:sqlite` (`DatabaseSync`) at `data/chat.db` with WAL mode enabled. No native build dependencies or C++ toolchains (`node-gyp`, Visual Studio) required; installs cleanly and identically across any OS.
 - **Indexes**: Indexed by `session_id`, `date_str` (`YYYY-MM-DD`), `created_at`, and `is_demo`.
-- **FTS5 Virtual Table (`messages_fts`)**: SQLite FTS5 index over message content kept in sync via insert/delete/update triggers, supporting BM25 relevance ranking.
+- **FTS5 Virtual Table (`messages_fts`) & Fallback**: Probes for SQLite FTS5 extension support at startup in a disposable in-memory database. When available, uses SQLite FTS5 index over message content with triggers and BM25 relevance ranking. If FTS5 is not compiled into the host SQLite build, it logs a clear warning and seamlessly falls back to a multi-token `LIKE` search over the same date range and `user_id` scope.
 - **Empty Startup**: A fresh database starts completely empty on boot. No fabricated conversations are seeded automatically.
 - **Explicit Demo Seeding (`src/db/seed.ts` / `npm run seed:demo`)**: Demo conversations are moved behind an explicit CLI command and clearly tagged in SQLite with `is_demo = 1` (normal live turns use `is_demo = 0`):
   - **"3 November"**: Seeded on `${YYYY}-11-03T14:20:00Z` covering Next.js 15.0.1, Node.js v22.11.0 LTS, and Claude 3.5 Sonnet token pricing.

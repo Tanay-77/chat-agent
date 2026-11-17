@@ -228,6 +228,14 @@ export function parseDates(
       continue;
     }
 
+    // Ignore temporal references that belong to future action/travel context (e.g. "planning to visit in April")
+    // rather than anchoring when the conversation turn took place.
+    const beforeMatch = text.slice(0, r.index).toLowerCase();
+    const isFutureActionDate = /\b(visit|travel|trip|fly|flying|going|vacation|holiday|event|conference|plan|planning|planned|scheduled)\s+(to\s+.*?\s+)?(in|for|during)\s*$/i.test(beforeMatch.trim());
+    if (isFutureActionDate) {
+      continue;
+    }
+
     const c = r.start;
     let year = c.get('year');
     const month = c.get('month');

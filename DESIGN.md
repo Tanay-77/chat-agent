@@ -32,6 +32,10 @@ flowchart TD
 5. **Deterministic First-Turn Tool Forcing on Change Words**:
    - *Choice:* If prompt contains change words (*changed*, *since*, *latest*, *pricing*) or past memory is retrieved, force function calling `mode: ANY` on turn 1.
    - *Rejected:* Pure `AUTO` mode, which sometimes answered from training weights without verifying online reality.
+6. **Node's Built-in `node:sqlite` vs. Native Addon `better-sqlite3`**:
+   - *Choice:* Use Node.js built-in `node:sqlite` (`DatabaseSync`).
+   - *Why:* Zero native compilation step. `better-sqlite3` requires C++ compilation via `node-gyp` whenever prebuilt binaries are missing (e.g. newer Node releases or unsupported platform ABIs), which frequently fails on developer machines lacking Visual Studio C++ build tools. `node:sqlite` is bundled directly with Node.js (>= 22.13), ensuring `npm install` works instantly and identically on any operating system (Windows, macOS, Linux) with zero native dependencies.
+   - *FTS5 Probing with Fallback:* At startup, a probe creates a virtual table in a disposable in-memory database (`:memory:`). If FTS5 is available, the system uses the full FTS5/BM25 ranking path. If FTS5 is unavailable in the host SQLite build, it logs one clear warning and gracefully falls back to a multi-token `LIKE` query over the same date range and `user_id` scope.
 
 ## Behavior When Memory Is Missing
 When the database is empty or lacks matching historical context, prompt rules strictly forbid simulating prior discussions. The agent reports that no historical record exists for that date or topic and asks the user to provide context. It never invents past shortlists or questions.
@@ -62,7 +66,7 @@ Cold benchmark (search cache cleared per request, Gemini 3.1 Flash-Lite, 8 runs)
 ## Known Limitations
 1. **Tavily publish-date filtering**: Tavily filters by original article publish date; pages updated or edited post-publish may be omitted from narrow date windows.
 2. **Snippets-only content**: `web_search` receives search result text excerpts, not full rendered web pages or dynamic client-side JS content.
-3. **Single-node SQLite**: `better-sqlite3` uses synchronous file I/O with a single-writer lock; horizontal scaling requires an external database.
+3. **Single-node SQLite**: `node:sqlite` uses synchronous file I/O with a single-writer lock; horizontal scaling requires an external database.
 
 ## Production Next Steps
 1. **Vector Hybrid Search**: FTS5 BM25 misses conceptual synonyms ("cloud database" vs "managed Postgres").
@@ -70,4 +74,4 @@ Cold benchmark (search cache cleared per request, Gemini 3.1 Flash-Lite, 8 runs)
 2. **Targeted Page Extraction**: Search snippets often miss pricing tables hidden in deep documentation.
    - *First step:* Call Tavily `/extract` on the top 2 ranked URLs when snippet confidence is low.
 3. **PostgreSQL Migration**: SQLite lacks multi-instance concurrency.
-   - *First step:* Swap `better-sqlite3` for `pg` pool with schema migrations to support multi-container deployments.
+   - *First step:* Swap `node:sqlite` for `pg` pool with schema migrations to support multi-container deployments.
