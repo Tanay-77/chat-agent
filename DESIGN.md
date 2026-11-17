@@ -1,77 +1,80 @@
 # DESIGN.md — Temporal Chat Agent Architecture
 
-## The Problem
-Build an agent that tracks technical decisions across past sessions ("What did I ask on Nov 3?", "Did our CRM shortlist from Monday change pricing?") without hallucinating past turns.
-**Core constraints:** Exactly one model-facing tool (`web_search`), no LLM date math, zero fabricated memories, and fast multi-entity search.
+## 1. Problem
+A chat agent with one tool (`web_search`), evaluated on speed, correctness, and natural conversation.
+The hard part is time: users refer to earlier chats and ask whether old answers are still right.
+The agent must track past statements without confusing historical records with current live facts.
 
-## Architecture Overview
+## 2. Architecture
 ```mermaid
-flowchart TD
-  Client[Client: React SPA] -->|POST /api/chat + Signed Cookie| Server[Express: Signed Cookie Auth]
-  Server -->|1. Parse Dates & TZ| Resolver[chrono-node Temporal Resolver]
-  Resolver -->|2. Scoped FTS5 BM25| SQLite[(SQLite: messages & FTS5)]
-  Server -->|3. System Prompt + Injected Memory| Gemini[Gemini 2.5 / Flash-Lite]
-  Gemini -->|4. web_search queries: []| Tavily[Tavily API: Promise.all Fan-out]
-  Tavily -->|5. Snippets + URLs| Gemini
-  Gemini -->|6. Temporal Diff + Citations| Client
+flowchart LR
+  Req[Request] --> Intent[Intent Check] --> Date[chrono-node Date Resolution] --> Mem[SQLite Date/FTS5] --> Model[Gemini Loop: web_search] --> SSE[Streamed Answer]
 ```
+Memory is pre-retrieved and injected into the prompt before calling the model (`gemini-3.1-flash-lite`); it is not a tool, keeping the one-tool rule intact.
+`web_search` uses default `'basic'` depth. The agent has a hard cap of 2 search calls: 1 initial call (forced for `VERIFY`, disabled for `RECALL`), and at most 1 retry at `'advanced'` depth if turn 1 returned 0 results or all dated results were older than the search window.
 
-## Decisions & Rejected Alternatives
-1. **Deterministic Pre-Retrieval vs. Memory Tool**:
-   - *Choice:* Query SQLite FTS5 in Node.js before the model turn; inject matched turns into the prompt.
-   - *Rejected:* A `recall_memory` tool. Violated the single-tool constraint, added an LLM round-trip, and failed when the model miscalculated anchor dates.
-2. **chrono-node + Client Timezone vs. LLM / Regex Date Math**:
-   - *Choice:* Client passes IANA timezone (e.g. `Asia/Kolkata`); chrono-node anchors relative phrases ("last week", "yesterday") and resolves ambiguous dates (11/3 as DD/MM in India, MM/DD in US).
-   - *Rejected:* Pure regex (brittle) or model arithmetic (frequently wrong across midnight and week boundaries).
-3. **Batched Parallel Search (`queries: string[]`) vs. Sequential Calls**:
-   - *Choice:* Single `web_search` declaration accepting 1–6 queries executed concurrently via `Promise.all` with URL deduplication.
-   - *Rejected:* Single query per call. Comparing 5 CRMs sequentially took ~12s and 5 model turns.
-4. **Signed httpOnly Cookie (`user_id`) vs. Unscoped Sessions**:
-   - *Choice:* HMAC-SHA256 signed cookie with random UUID. All SQLite queries (`messages`, `messages_fts`) filter on `user_id = ?`, allowing cross-session recall only within that user.
-   - *Rejected:* Global queries with `sessionId = null`, which leaked User B's conversations into User A's context.
-5. **Deterministic First-Turn Tool Forcing on Change Words**:
-   - *Choice:* If prompt contains change words (*changed*, *since*, *latest*, *pricing*) or past memory is retrieved, force function calling `mode: ANY` on turn 1.
-   - *Rejected:* Pure `AUTO` mode, which sometimes answered from training weights without verifying online reality.
-6. **Node's Built-in `node:sqlite` vs. Native Addon `better-sqlite3`**:
-   - *Choice:* Use Node.js built-in `node:sqlite` (`DatabaseSync`).
-   - *Why:* Zero native compilation step. `better-sqlite3` requires C++ compilation via `node-gyp` whenever prebuilt binaries are missing (e.g. newer Node releases or unsupported platform ABIs), which frequently fails on developer machines lacking Visual Studio C++ build tools. `node:sqlite` is bundled directly with Node.js (>= 22.13), ensuring `npm install` works instantly and identically on any operating system (Windows, macOS, Linux) with zero native dependencies.
-   - *FTS5 Probing with Fallback:* At startup, a probe creates a virtual table in a disposable in-memory database (`:memory:`). If FTS5 is available, the system uses the full FTS5/BM25 ranking path. If FTS5 is unavailable in the host SQLite build, it logs one clear warning and gracefully falls back to a multi-token `LIKE` query over the same date range and `user_id` scope.
+## 3. Key Decisions
+1. **Memory pre-retrieval vs recall tool**: Code queries SQLite before the model turn. A recall tool was rejected because it would add a model round trip before every answer.
+2. **SQLite date-range + FTS5 vs vector DB**: Embedded SQLite provides deterministic date filtering and BM25 text ranking without vector infrastructure complexity.
+3. **Dates in code vs model date math**: Code uses `chrono-node` with the client's IANA timezone and an injectable clock. Model date math was rejected because it miscalculates midnight and week boundaries.
+4. **Intent check for recall vs verify**: `classifyIntent` routes `RECALL` queries to tool mode `NONE` (0 searches) and `VERIFY` queries to tool mode `ANY` (forces 1 search). Pure `AUTO` was rejected because it over-searched on recall and failed to verify past claims online.
+5. **Per-user scoping via signed cookie**: HMAC-SHA256 signed `user_id` cookie scopes all database queries (`user_id = ?`). Unscoped queries were rejected because they leak data across users.
+6. **node:sqlite with FTS5 probe and fallback**: Built-in `node:sqlite` avoids native C++ compilation (`node-gyp`). It probes FTS5 in a temporary DB and falls back to multi-token `LIKE` search if unavailable.
+7. **Batching multiple queries into one tool call**: `web_search` accepts an array `queries: string[]` executed concurrently via `Promise.all`. Batching avoids N sequential model turns (see reasoning in Section 5).
 
-## Behavior When Memory Is Missing
-When the database is empty or lacks matching historical context, prompt rules strictly forbid simulating prior discussions. The agent reports that no historical record exists for that date or topic and asks the user to provide context. It never invents past shortlists or questions.
+## 4. How It Stays Honest
+- **Past conversations are not current facts**: Stored turns record what was said or claimed. Current facts (prices, versions) must come only from this turn's search results.
+- **Retrieval returns user messages by default**: Assistant messages are excluded from keyword retrieval unless the user explicitly asks what the assistant said, preventing hallucination feedback loops.
+- **No-record behavior**: If a date has no messages, the agent states it has no record for that date and reports the earliest stored date found by `getEarliestMessageDate(userId)`.
+- **Citations and dates**: Links are placed on specific claim phrases using the source site name; answers prefer recent sources with explicit dates.
+- **Search window in verify answers**: For verification queries, `searchWindow` starts at the anchor conversation date. If no updates appear, the answer explicitly states the window evaluated (e.g. "since [YYYY-MM-DD]") and that no published changes were found.
 
-## Measured Latency (bench/results.json)
-Cold benchmark (search cache cleared per request, Gemini 3.1 Flash-Lite, 8 runs):
-| Category | Runs | TTFT p50 | Total p50 | Search p50 | Tool Calls |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `no-search` | 2 | 21.4s | 21.6s | 2.36s | 1.0 |
-| `single-search` | 2 | 23.5s | 23.7s | 3.61s | 1.0 |
-| `multi-entity-search` | 2 | 14.6s | 16.2s | 1.73s | 1.0 |
-| `follow-up` | 2 | 9.59s | 10.96s | 3.24s | 1.0 |
-| **Overall Cold** | **8** | **19.5s** | **20.8s** | **2.36s** | **1.0 (0 fails)** |
+## 5. Performance
+All numbers are cold runs (search cache cleared per request). Samples are small, so they are indicative only.
 
-- **Warm Suite** (search cache active): Overall TTFT p50: 4.85s | Total p50: 5.78s | Search p50: 2.15s.
-- **Parallel vs Sequential** (5 cold runs each on 3-CRM comparison):
-  - Parallel search: median 1,702 ms (range 1,600 – 1,745 ms)
-  - Sequential search: median 2,033 ms (range 1,533 – 3,891 ms)
+Single cold runs, n=2 each: an answer with no search took about 2.6 s total (2,666 ms and 2,557 ms). An answer with one search took about 4.2-4.5 s total (4,195 ms and 4,519 ms).
 
-## Transcripts on Empty Database
-1. **Prompt:** *"What did I ask you on 3 November? Is your answer still correct today?"*
-   - **Response:** *"I have no record of any conversation or questions from you on 3 November 2026. My historical memory only contains the current interaction. Please share what you asked..."* (0 hallucinations).
-2. **Prompt:** *"On Monday we shortlisted 5 CRM tools for a 20-person sales team. Has any of them changed pricing?"*
-   - **Response:** *"I have no record of a previous conversation or a CRM shortlist from this past Monday (November 9, 2026). Please provide the shortlist or specify which tools you'd like me to check..."*
-3. **Prompt:** *"What is the current stable release version of Next.js?"*
-   - **Response:** Dispatches `web_search(["Next.js current stable release version"])` and answers: *"The current stable release line is Next.js 16, with active patch releases (v16.4.x) and Next.js 15 in maintenance LTS."* (includes source links).
+Parallel vs sequential search inside one tool call (same 3-CRM pricing prompt, n=5 each):
+| | Search median (range) | TTFT median (range) | Total median (range) |
+| Parallel | 613 ms (410-3,379) | 7,237 ms (4,291-9,320) | 9,885 ms (7,086-11,794) |
+| Sequential | 922 ms (920-1,040) | 4,549 ms (4,170-5,846) | 7,281 ms (6,695-8,347) |
+The search ranges overlap, so there is no reliable difference at the search stage. End to end, parallel was slower in this run. Parallel ran first and sequential second, so drifting Gemini latency may account for part of the gap. Both modes made one tool call. I did not benchmark the real alternative, one query per tool call (N model turns), so batching is chosen by reasoning (it avoids N model round trips), not by measurement.
 
-## Known Limitations
-1. **Tavily publish-date filtering**: Tavily filters by original article publish date; pages updated or edited post-publish may be omitted from narrow date windows.
-2. **Snippets-only content**: `web_search` receives search result text excerpts, not full rendered web pages or dynamic client-side JS content.
-3. **Single-node SQLite**: `node:sqlite` uses synchronous file I/O with a single-writer lock; horizontal scaling requires an external database.
+Thinking budget (minimal vs default, n=2 each, different prompts): no measurable difference at this sample size.
 
-## Production Next Steps
-1. **Vector Hybrid Search**: FTS5 BM25 misses conceptual synonyms ("cloud database" vs "managed Postgres").
-   - *First step:* Add `sqlite-vec` embeddings with `text-embedding-004` and blend scores via Reciprocal Rank Fusion.
-2. **Targeted Page Extraction**: Search snippets often miss pricing tables hidden in deep documentation.
-   - *First step:* Call Tavily `/extract` on the top 2 ranked URLs when snippet confidence is low.
-3. **PostgreSQL Migration**: SQLite lacks multi-instance concurrency.
-   - *First step:* Swap `node:sqlite` for `pg` pool with schema migrations to support multi-container deployments.
+Where the time goes: in the parallel vs sequential runs, search took about 0.4-3.4 s of 7-12 s total, so most of the time is model time.
+
+## 6. Tests
+- Tests cover date resolution, memory filtering, search policies (recall = 0, verify = 1, cap = 2), and grounding.
+- Uses a fixed clock (`2026-11-12T12:00:00Z`), in-memory SQLite (`:memory:`) with a guard throwing if `data/chat.db` is opened, and mocked Gemini and Tavily (no API keys, zero network).
+- Command: `npm test` (`tsx --test tests/*.test.ts`): 14 passing tests across 4 suites. Line count: 309 lines across 5 files under `tests/`.
+
+## 7. Example Transcripts
+1. **Empty DB date query**:
+   - *User:* "What did I ask on 3 November?"
+   - *Agent:* "I have no record of any conversation or questions from you on November 3, 2026. This user's earliest stored message is no stored history."
+   - *Note:* Shows strict adherence to empty note reporting without inventing past discussions.
+2. **Cross-session fact recall**:
+   - *Chat 1 User:* "My favorite language is TypeScript." -> *Agent:* "I have noted that your favorite language is TypeScript."
+   - *Chat 2 User:* "What is my favorite language?" -> *Agent:* "Based on our earlier conversation, your favorite language is TypeScript."
+   - *Note:* Pre-retrieval injects historical user statements across sessions without calling search.
+3. **Verify outdated statement**:
+   - *User:* "Is your answer from yesterday about Node.js still correct?"
+   - *Agent:* "Yesterday I stated Node.js 22.11.0 was current. Based on current search results, Node.js 26.13.0 (nodejs.org) is now released, so the earlier answer is outdated."
+   - *Note:* Forces web search and treats past conversation as a historical claim to update rather than current truth.
+4. **Pricing check with search window**:
+   - *User:* "Last Tuesday I asked you about Postgres hosting. Has any pricing changed since then?"
+   - *Agent:* "Checking Postgres hosting with search window since 2026-11-10: Supabase Pro remains $25/mo and Neon is $0.106/CU-hour. No price changes were published in this window."
+   - *Note:* Explicitly states the evaluated search window and reports absence of published changes.
+
+## 8. Known Limitations
+1. Keyword intent check can miss unusual phrasings (fallback is model's tool choice in `AUTO` mode).
+2. Memory is message-level rather than structured claim-level.
+3. Tavily filters by article publish date, so "no news found" does not prove that documentation did not change post-publish.
+4. Snippets only: the agent does not fetch full web pages or execute dynamic client-side JS.
+5. Single-node SQLite: `node:sqlite` relies on single-writer process file locks.
+6. Latency depends on external Gemini API response times and rate limit quotas.
+
+## 9. Next Steps
+1. **Targeted page extraction**: Search snippets can miss embedded pricing tables. *First step:* call Tavily `/extract` on the top 2 result URLs when pricing details are ambiguous.
+2. **Claim-level verification**: Extract specific claims (a version, a price) from an earlier answer and check each one. *First step:* store extracted claims alongside assistant messages.
