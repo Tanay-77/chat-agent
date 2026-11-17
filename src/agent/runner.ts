@@ -35,6 +35,10 @@ export interface AgentEvent {
   type: AgentEventType;
   step?: 'memory' | 'search';
   found?: number;
+  dateResolved?: boolean;
+  dateStr?: string;
+  earliestDate?: string;
+  matchType?: 'date' | 'fts' | 'none';
   snippets?: Array<{ date: string; text: string }>;
   queries?: number | string[];
   results?: number;
@@ -137,6 +141,7 @@ However, user personal context and statements (e.g., the user's name, preference
    - For comparisons, prioritize compact Markdown tables and high-density bullet points so the user gets facts immediately.
 
 6. STRICT ANTI-FABRICATION RULE & AMBIGUOUS DATE RESOLUTION:
+   - If the memory note says no messages exist for the requested date, say so plainly and mention the earliest date the history covers. Don't guess or use other dates' content as if it answered the question.
    - If the user refers to a past conversation, prior discussion, shortlist, question, or specific date (e.g., "what did I ask on 3 November?", "on Monday we shortlisted...", "last Tuesday I asked you about..."), and the HISTORICAL CONVERSATION MEMORY section above is empty or does NOT contain any matching record of that conversation:
      * You MUST explicitly state that you have no record of that prior conversation or question for that date/topic.
      * Ask the user to share the details or provide context.
@@ -317,7 +322,11 @@ export async function runAgent(
     type: 'trace',
     step: 'memory',
     found: temporalRes.matchedMessages.length,
-    snippets: temporalRes.matchedMessages.map((m) => ({
+    dateResolved: temporalRes.dateResolved,
+    dateStr: temporalRes.resolvedDateStr,
+    earliestDate: temporalRes.earliestDate,
+    matchType: temporalRes.matchType,
+    snippets: temporalRes.matchedMessages.slice(0, 3).map((m) => ({
       date: m.date_str || m.created_at.slice(0, 10),
       text: m.content
     }))

@@ -4,4 +4,5 @@ data/
 .env
 *.log
 .agents/
-
+public/bundle.js
+public/bundle.js.map

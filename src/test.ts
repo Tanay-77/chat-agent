@@ -1367,26 +1367,6 @@ async function runTests() {
 
     // 4. In Session 2 for User Alpha, the agent can still recall Session 1's content
     const sessionA2Id = `session-alpha2-${Date.now()}`;
-    insertMessage(
-      sessionA2Id,
-      'user',
-      'What did I ask you to analyze in CRM earlier?',
-      new Date().toISOString(),
-      null,
-      false,
-      'UTC',
-      userAlpha
-    );
-    insertMessage(
-      sessionA2Id,
-      'assistant',
-      'You asked for a competitive analysis of CRM tools.',
-      new Date().toISOString(),
-      null,
-      false,
-      'UTC',
-      userAlpha
-    );
     console.log('  -> Asking in new session: "What did I ask you to analyze in CRM earlier?"...');
     const recallEvents: AgentEvent[] = [];
     const recallAnswer = await runAgent(
@@ -1588,6 +1568,153 @@ async function runTests() {
     clearDatabase(traceTestUser);
     clearDatabase(nodeTestUser);
 
+    // ----------------------------------------------------
+    // 14. Testing Memory Retrieval Fallback When Date Resolved
+    // ----------------------------------------------------
+    console.log('\n[14/14] Testing Memory Retrieval Fallback When Date Resolved...');
+    const dateFallbackUser = 'user-date-fallback-' + Date.now();
+    clearDatabase(dateFallbackUser);
+
+    // Setup: DB with messages ONLY on 2026-11-16
+    const nov16Session = 'session-nov16-' + Date.now();
+    insertMessage(
+      nov16Session,
+      'user',
+      'What are the top CRM tools for a sales team?',
+      '2026-11-16T10:00:00Z',
+      null,
+      false,
+      'UTC',
+      dateFallbackUser
+    );
+    insertMessage(
+      nov16Session,
+      'assistant',
+      'HubSpot and Pipedrive are great options for a sales team.',
+      '2026-11-16T10:01:00Z',
+      null,
+      false,
+      'UTC',
+      dateFallbackUser
+    );
+
+    const testToday17 = new Date('2026-11-17T12:00:00Z'); // Today is the 17th
+
+    // 14.1 Unit check on temporal resolver for "what did I ask on 3 November?"
+    console.log('  -> Testing temporal resolver for "what did I ask on 3 November?" (DB messages only on 2026-11-16)...');
+    const nov3ResolverRes = resolveTemporalContext(
+      'what did I ask on 3 November?',
+      'session-nov3-test',
+      testToday17,
+      MAX_CONTEXT_CHARS,
+      'UTC',
+      dateFallbackUser
+    );
+
+    if (nov3ResolverRes.matchedMessages.length !== 0) {
+      throw new Error(`Expected 0 matched messages for 3 November, got ${nov3ResolverRes.matchedMessages.length}`);
+    }
+    if (!nov3ResolverRes.dateResolved || nov3ResolverRes.resolvedDateStr !== '2026-11-03') {
+      throw new Error(`Expected dateResolved=true with resolvedDateStr=2026-11-03, got dateResolved=${nov3ResolverRes.dateResolved}, resolvedDateStr=${nov3ResolverRes.resolvedDateStr}`);
+    }
+    if (nov3ResolverRes.earliestDate !== '2026-11-16') {
+      throw new Error(`Expected earliestDate=2026-11-16, got ${nov3ResolverRes.earliestDate}`);
+    }
+    const expectedNov3Note = "No messages exist for 2026-11-03. This user's earliest stored message is 2026-11-16.";
+    if (!nov3ResolverRes.formattedContext.includes(expectedNov3Note)) {
+      throw new Error(`Expected formattedContext to contain note "${expectedNov3Note}", got: "${nov3ResolverRes.formattedContext}"`);
+    }
+    console.log('  ✓ Temporal resolver correctly injected no-messages note and computed earliest date (2026-11-16).');
+
+    // 14.2 Trace and Agent behavior for "what did I ask on 3 November?"
+    console.log('  -> Testing agent run for "what did I ask on 3 November?"...');
+    const nov3Events: AgentEvent[] = [];
+    const nov3Answer = await runAgent(
+      'what did I ask on 3 November?',
+      'session-nov3-agent',
+      (ev) => nov3Events.push(ev),
+      testToday17,
+      { userId: dateFallbackUser }
+    );
+
+    const nov3MemTrace = nov3Events.find((e) => e.type === 'trace' && e.step === 'memory');
+    if (!nov3MemTrace || nov3MemTrace.found !== 0) {
+      throw new Error(`Expected memory trace found=0, got: ${JSON.stringify(nov3MemTrace)}`);
+    }
+    if (!nov3MemTrace.snippets || nov3MemTrace.snippets.length !== 0) {
+      throw new Error(`Expected 0 snippets in memory trace for 3 November, got ${nov3MemTrace.snippets?.length}`);
+    }
+    if (nov3MemTrace.dateStr !== '2026-11-03' || nov3MemTrace.earliestDate !== '2026-11-16') {
+      throw new Error(`Expected dateStr=2026-11-03 and earliestDate=2026-11-16, got ${JSON.stringify(nov3MemTrace)}`);
+    }
+
+    const nov3Pill = computeTracePillState(nov3Events as any);
+    if (!nov3Pill.shouldRender) {
+      throw new Error('Expected trace pill to render for date resolved zero found');
+    }
+    if (nov3Pill.collapsedText !== 'Checked earlier conversation · nothing on 2026-11-03') {
+      throw new Error(`Expected collapsed text "Checked earlier conversation · nothing on 2026-11-03", got "${nov3Pill.collapsedText}"`);
+    }
+    const expectedExpandedHeader = 'No messages stored for 2026-11-03. Earliest stored message: 2026-11-16.';
+    if (nov3Pill.memoryHeaderText !== expectedExpandedHeader) {
+      throw new Error(`Expected expanded header "${expectedExpandedHeader}", got "${nov3Pill.memoryHeaderText}"`);
+    }
+    if (nov3Pill.memorySnippets.length !== 0) {
+      throw new Error(`Expected 0 snippets in pill state, got ${nov3Pill.memorySnippets.length}`);
+    }
+
+    const lowerNov3Answer = nov3Answer.toLowerCase();
+    const statesNoRecordNov3 =
+      lowerNov3Answer.includes('no record') ||
+      lowerNov3Answer.includes('no messages') ||
+      lowerNov3Answer.includes('no stored') ||
+      lowerNov3Answer.includes('no conversation') ||
+      lowerNov3Answer.includes('no prior') ||
+      lowerNov3Answer.includes("don't have any record") ||
+      lowerNov3Answer.includes('earliest');
+    if (!statesNoRecordNov3) {
+      throw new Error(`Expected answer to state no record exists for 3 November, got: "${nov3Answer}"`);
+    }
+    console.log('  ✓ Query "what did I ask on 3 November?" successfully showed zero snippets and answered with no record.');
+
+    // 14.3 Query "what did I ask yesterday?" with messages on the 16th (today is the 17th) shows them
+    console.log('  -> Testing agent run for "what did I ask yesterday?" (yesterday = 2026-11-16)...');
+    const yesterdayEvents: AgentEvent[] = [];
+    const yesterdayAnswer = await runAgent(
+      'what did I ask yesterday?',
+      'session-yesterday-agent',
+      (ev) => yesterdayEvents.push(ev),
+      testToday17,
+      { userId: dateFallbackUser }
+    );
+
+    const yesterdayMemTrace = yesterdayEvents.find((e) => e.type === 'trace' && e.step === 'memory');
+    if (!yesterdayMemTrace || !yesterdayMemTrace.found || yesterdayMemTrace.found < 1) {
+      throw new Error(`Expected memory trace found>=1 for yesterday, got: ${JSON.stringify(yesterdayMemTrace)}`);
+    }
+    if (!yesterdayMemTrace.snippets || yesterdayMemTrace.snippets.length === 0 || !yesterdayMemTrace.snippets.some(s => s.text.includes('CRM tools'))) {
+      throw new Error(`Expected memory snippets containing yesterday's CRM question, got: ${JSON.stringify(yesterdayMemTrace.snippets)}`);
+    }
+
+    const yesterdayPill = computeTracePillState(yesterdayEvents as any);
+    if (!yesterdayPill.shouldRender || yesterdayPill.collapsedText !== 'Used earlier conversation') {
+      throw new Error(`Expected collapsed text "Used earlier conversation", got "${yesterdayPill.collapsedText}"`);
+    }
+    if (!yesterdayPill.memoryHeaderText.includes('from 2026-11-16')) {
+      throw new Error(`Expected memory header to mention "from 2026-11-16", got "${yesterdayPill.memoryHeaderText}"`);
+    }
+    if (yesterdayPill.memorySnippets.length === 0 || !yesterdayPill.memorySnippets.some(s => s.text.includes('CRM tools'))) {
+      throw new Error(`Expected snippets in pill state to show CRM question, got ${JSON.stringify(yesterdayPill.memorySnippets)}`);
+    }
+
+    const lowerYesterdayAnswer = yesterdayAnswer.toLowerCase();
+    if (!lowerYesterdayAnswer.includes('crm')) {
+      throw new Error(`Expected answer for yesterday to recall CRM question, got: "${yesterdayAnswer}"`);
+    }
+    console.log('  ✓ Query "what did I ask yesterday?" successfully retrieved messages from 2026-11-16 and showed them.');
+
+    clearDatabase(dateFallbackUser);
+
   } finally {
     testServer.close();
     clearDatabase(userAlpha);
@@ -1595,7 +1722,7 @@ async function runTests() {
   }
   console.log('  ✓ Test server closed and database cleaned.');
 
-  console.log('\nAll 13 test suites passed successfully!');
+  console.log('\nAll 14 test suites passed successfully!');
 }
 
 runTests().catch((err) => {

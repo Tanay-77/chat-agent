@@ -10,6 +10,10 @@ export interface AgentTraceEvent {
   type: 'status' | 'trace' | 'tool_start' | 'tool_end' | 'token' | 'done' | 'error';
   step?: 'memory' | 'search';
   found?: number;
+  dateResolved?: boolean;
+  dateStr?: string;
+  earliestDate?: string;
+  matchType?: 'date' | 'fts' | 'none';
   snippets?: Array<{ date: string; text: string }>;
   queries?: number | string[];
   results?: number;

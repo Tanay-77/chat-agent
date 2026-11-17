@@ -560,6 +560,16 @@ export function getSessionMessages(sessionId: string, userId: string = 'default-
 }
 
 /**
+ * Returns the earliest date_str for messages stored for this user, or null if no messages exist.
+ */
+export function getEarliestMessageDate(userId: string = 'default-user'): string | null {
+  const row = db
+    .prepare("SELECT MIN(date_str) AS earliest_date FROM messages WHERE user_id = ? AND date_str IS NOT NULL AND date_str != ''")
+    .get(userId) as { earliest_date: string | null } | undefined;
+  return row?.earliest_date || null;
+}
+
+/**
  * Clears messages and sessions from the database (optionally scoped to a user) and rebuilds FTS5 index.
  */
 export function clearDatabase(userId?: string): void {

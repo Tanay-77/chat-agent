@@ -12,6 +12,7 @@ export interface TracePillState {
   hasSearch: boolean;
   memoryFound: number;
   memorySnippets: Array<{ date: string; text: string }>;
+  memoryHeaderText: string;
   searchQueries: number;
   searchResults: number;
   searchDurationSec: string;
@@ -21,7 +22,15 @@ export function computeTracePillState(trace?: AgentTraceEvent[]): TracePillState
   const memoryTrace = trace?.find((e) => e.type === 'trace' && e.step === 'memory');
   const searchTraces = (trace || []).filter((e) => e.type === 'trace' && e.step === 'search');
 
-  const hasMemory = Boolean(memoryTrace && typeof memoryTrace.found === 'number' && memoryTrace.found > 0);
+  const foundCount = typeof memoryTrace?.found === 'number' ? memoryTrace.found : 0;
+  const isDateResolvedZero = Boolean(
+    memoryTrace &&
+    memoryTrace.dateResolved &&
+    foundCount === 0 &&
+    memoryTrace.dateStr
+  );
+  const hasMemoryFound = Boolean(memoryTrace && foundCount > 0);
+  const hasMemory = hasMemoryFound || isDateResolvedZero;
   const hasSearch = searchTraces.length > 0;
 
   if (!hasMemory && !hasSearch) {
@@ -32,17 +41,37 @@ export function computeTracePillState(trace?: AgentTraceEvent[]): TracePillState
       hasSearch: false,
       memoryFound: 0,
       memorySnippets: [],
+      memoryHeaderText: '',
       searchQueries: 0,
       searchResults: 0,
       searchDurationSec: '0.0'
     };
   }
 
+  let memoryCollapsed = '';
+  let memoryHeaderText = '';
+  let memorySnippets: Array<{ date: string; text: string }> = [];
+
+  if (isDateResolvedZero) {
+    memoryCollapsed = `Checked earlier conversation · nothing on ${memoryTrace?.dateStr}`;
+    memoryHeaderText = `No messages stored for ${memoryTrace?.dateStr}. Earliest stored message: ${memoryTrace?.earliestDate || 'no stored history'}.`;
+    memorySnippets = [];
+  } else if (hasMemoryFound) {
+    memoryCollapsed = 'Used earlier conversation';
+    memorySnippets = (memoryTrace?.snippets || []).slice(0, 3);
+    if (memoryTrace?.dateResolved || memoryTrace?.matchType === 'date') {
+      const dateLabel = memoryTrace?.dateStr || (memorySnippets[0]?.date ?? '');
+      memoryHeaderText = `Found ${foundCount} message(s) from ${dateLabel}`;
+    } else {
+      memoryHeaderText = `Found ${foundCount} related message(s)`;
+    }
+  }
+
   let collapsedText = '';
-  if (hasMemory && hasSearch) {
-    collapsedText = 'Used earlier conversation · Searched the web';
-  } else if (hasMemory) {
-    collapsedText = 'Used earlier conversation';
+  if (memoryCollapsed && hasSearch) {
+    collapsedText = `${memoryCollapsed} · Searched the web`;
+  } else if (memoryCollapsed) {
+    collapsedText = memoryCollapsed;
   } else if (hasSearch) {
     collapsedText = 'Searched the web';
   }
@@ -61,8 +90,9 @@ export function computeTracePillState(trace?: AgentTraceEvent[]): TracePillState
     collapsedText,
     hasMemory,
     hasSearch,
-    memoryFound: memoryTrace?.found || 0,
-    memorySnippets: (memoryTrace?.snippets || []).slice(0, 3),
+    memoryFound: foundCount,
+    memorySnippets,
+    memoryHeaderText,
     searchQueries: totalQueries,
     searchResults: totalResults,
     searchDurationSec: durationSec
@@ -92,16 +122,18 @@ export const AgentTrace: React.FC<AgentTraceProps> = ({ trace }) => {
           {state.hasMemory && (
             <div className="trace-memory-block">
               <div className="trace-memory-header">
-                Found {state.memoryFound} earlier message(s)
+                {state.memoryHeaderText}
               </div>
-              <div className="trace-snippet-list">
-                {state.memorySnippets.map((snippet, idx) => (
-                  <div key={idx} className="trace-snippet-item">
-                    <span className="trace-snippet-date">{snippet.date}</span>
-                    <span className="trace-snippet-text">{snippet.text}</span>
-                  </div>
-                ))}
-              </div>
+              {state.memorySnippets.length > 0 && (
+                <div className="trace-snippet-list">
+                  {state.memorySnippets.map((snippet, idx) => (
+                    <div key={idx} className="trace-snippet-item">
+                      <span className="trace-snippet-date">{snippet.date}</span>
+                      <span className="trace-snippet-text">{snippet.text}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
